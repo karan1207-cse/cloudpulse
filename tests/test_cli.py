@@ -8,7 +8,12 @@ from cloudpulse.cli import main
 
 def test_cli_prints_successful_health_check(capsys):
     with (
-        patch("sys.argv", ["cloudpulse", "https://example.com"]),
+        patch("sys.argv", [
+            "cloudpulse",
+            "https://example.com",
+            "--interval",
+            "1",
+        ]),
         patch(
             "cloudpulse.cli.MonitoringService.run_check",
             return_value={
@@ -20,13 +25,15 @@ def test_cli_prints_successful_health_check(capsys):
             },
         ),
         patch(
-            "cloudpulse.cli.MonitoringService.__post_init__"
+            "cloudpulse.cli.time.sleep",
+            side_effect=KeyboardInterrupt,
         ),
     ):
         main()
 
     output = capsys.readouterr().out
 
-    assert "Health Check Result:" in output
+    assert "Monitoring: https://example.com" in output
+    assert "Health Check #1" in output
     assert '"is_healthy": true' in output
-    assert "Stored checks: 0" in output
+    assert "CloudPulse monitoring stopped." in output
