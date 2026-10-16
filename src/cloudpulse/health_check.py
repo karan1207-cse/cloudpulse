@@ -3,6 +3,7 @@
 
 import time
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
@@ -19,6 +20,17 @@ def check_health(url: str, timeout: float = 5.0) -> dict:
     }
 
     try:
+        parsed_url = urlparse(url)
+
+        if (
+            parsed_url.scheme not in ("http", "https")
+            or not parsed_url.hostname
+        ):
+            raise ValueError("A valid HTTP or HTTPS URL is required.")
+
+        if timeout <= 0:
+            raise ValueError("Timeout must be greater than zero.")
+
         request = Request(url, method="GET")
 
         with urlopen(request, timeout=timeout) as response:

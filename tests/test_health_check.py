@@ -28,3 +28,26 @@ def test_network_failure():
     assert result["is_healthy"] is False
     assert result["error"] is not None
     assert result["response_time_ms"] >= 0
+
+def test_http_error():
+    from urllib.error import HTTPError
+
+    with patch(
+        "cloudpulse.health_check.urlopen",
+        side_effect=HTTPError(
+            "https://example.com", 503, "Service Unavailable", {}, None
+        ),
+    ):
+        result = check_health("https://example.com")
+
+    assert result["is_healthy"] is False
+    assert result["status_code"] == 503
+    assert result["error"] == "HTTP error: 503"
+
+
+def test_invalid_url():
+    result = check_health("ftp://example.com")
+
+    assert result["is_healthy"] is False
+    assert result["error"] is not None
+    assert result["status_code"] is None
