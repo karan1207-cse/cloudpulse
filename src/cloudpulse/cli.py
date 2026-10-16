@@ -5,6 +5,8 @@ import argparse
 import json
 import time
 
+from cloudpulse.incident_storage import JsonIncidentStorage
+from cloudpulse.json_storage import JsonHealthCheckStorage
 from cloudpulse.monitor import MonitoringService
 
 
@@ -40,8 +42,10 @@ def main() -> None:
 
     try:
         service = MonitoringService(
-            service_url=args.url,
-            failure_threshold=args.threshold,
+        service_url=args.url,
+        failure_threshold=args.threshold,
+        history=JsonHealthCheckStorage("data/health_checks.json"),
+        incident_storage=JsonIncidentStorage("data/incidents.json"),
         )
 
         print(f"Monitoring: {args.url}")

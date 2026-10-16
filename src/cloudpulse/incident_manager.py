@@ -71,3 +71,16 @@ class ServiceIncidentTracker:
         self.active_incident = None
 
         return recovered_incident
+    
+    def restore_active_incident(self, incident: Incident) -> None:
+        """Restore an existing open incident after a restart."""
+        if incident.status != "OPEN":
+            raise ValueError("Only open incidents can be restored.")
+
+        if self.active_incident is not None:
+            raise ValueError("An active incident already exists.")
+
+        if incident.service_url != self.service_url:
+            raise ValueError("Incident URL does not match the tracked service.")
+
+        self.active_incident = incident
