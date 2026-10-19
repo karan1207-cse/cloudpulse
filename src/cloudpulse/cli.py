@@ -221,7 +221,12 @@ def _load(args: argparse.Namespace) -> AppConfig:
     if getattr(args, "allow_private", False):
         overrides["allow_private_targets"] = True
     return load_config(
-        env, services_file=getattr(args, "services_file", None), overrides=overrides
+        env,
+        services_file=getattr(args, "services_file", None),
+        overrides=overrides,
+        # One-off checks and single-URL monitoring do not use the service list,
+        # so a problem in it must not block them.
+        load_services=args.command not in ("check", "monitor"),
     )
 
 

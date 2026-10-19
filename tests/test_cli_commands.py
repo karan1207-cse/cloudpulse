@@ -192,3 +192,17 @@ def test_run_loop_until_interrupted(capsys, workspace):
 
     assert code == cli.EXIT_INTERRUPTED
     assert "Round 1" in capsys.readouterr().out
+
+
+def test_check_ignores_unrelated_services_file(capsys, workspace, monkeypatch):
+    # Regression: `check` failed with a config error because the services
+    # file contained a loopback URL that only `run` would use.
+    bad = workspace / "bad-services.json"
+    bad.write_text(json.dumps([{"name": "local", "url": "http://127.0.0.1:1/"}]))
+    monkeypatch.setenv("CLOUDPULSE_SERVICES_FILE", str(bad))
+
+    with fake_network(200):
+        code = cli.main(["check", "https://example.com/"])
+
+    assert code == cli.EXIT_OK
+    assert cli.main(["config"]) == cli.EXIT_USAGE

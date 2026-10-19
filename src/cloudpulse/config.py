@@ -281,8 +281,13 @@ def load_config(
     *,
     services_file: str | Path | None = None,
     overrides: Mapping[str, Any] | None = None,
+    load_services: bool = True,
 ) -> AppConfig:
-    """Build and validate an :class:`AppConfig`; raise ``ConfigError`` on problems."""
+    """Build and validate an :class:`AppConfig`; raise ``ConfigError`` on problems.
+
+    ``load_services=False`` skips the service list entirely, for commands such
+    as a one-off ``check`` that do not use it.
+    """
     env = dict(os.environ if env is None else env)
     overrides = dict(overrides or {})
 
@@ -323,6 +328,8 @@ def load_config(
     services: tuple[ServiceConfig, ...] = ()
     file_value = services_file or _optional(env, "CLOUDPULSE_SERVICES_FILE")
     inline = _optional(env, "CLOUDPULSE_SERVICES")
+    if not load_services:
+        file_value = inline = None
     if file_value and inline:
         raise ConfigError(
             "Set only one of CLOUDPULSE_SERVICES_FILE and CLOUDPULSE_SERVICES."
