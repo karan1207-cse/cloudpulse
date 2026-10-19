@@ -1,11 +1,16 @@
 """Local incident + monitoring-state storage (in-memory and JSON files)."""
 
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from cloudpulse.clock import parse_utc_iso, to_utc_iso
 from cloudpulse.errors import ConcurrencyConflictError, StorageCorruptError
 from cloudpulse.incident_manager import Incident, incident_from_dict
-from cloudpulse.jsonfile import ensure_file, read_json, write_json
+from cloudpulse.jsonfile import ensure_file, file_mutex, read_json, write_json
 from cloudpulse.state import ServiceState
 
 
@@ -25,8 +30,17 @@ def _validate_limit(limit: int) -> int:
     return limit
 
 
+LEASE_PREFIX = "__lease__:"
+_LEASE_LOCK = threading.Lock()
+
+
 class _LocalIncidentStore:
     """Shared logic for local stores; subclasses provide load/save."""
+
+    @contextmanager
+    def _state_mutex(self) -> Iterator[None]:
+        with _LEASE_LOCK:
+            yield
 
     def _load_incidents(self) -> list[dict[str, Any]]:
         raise NotImplementedError
@@ -151,6 +165,38 @@ class _LocalIncidentStore:
         state = self.get_state(service_url) or ServiceState(service=service_url)
         self.save_state(state.with_changes(consecutive_failures=count))
 
+    # -- leases -----------------------------------------------------------
+
+    def acquire_lease(
+        self, name: str, owner: str, ttl_seconds: float, now: datetime
+    ) -> bool:
+        key = LEASE_PREFIX + name
+        with self._state_mutex():
+            states = self._load_states()
+            current = states.get(key)
+            if isinstance(current, dict) and current.get("owner") != owner:
+                try:
+                    expires = parse_utc_iso(current["expires_at"])
+                except (KeyError, ValueError):
+                    expires = now  # unreadable lease: treat as expired
+                if expires > now:
+                    return False
+            states[key] = {
+                "owner": owner,
+                "expires_at": to_utc_iso(now + timedelta(seconds=ttl_seconds)),
+            }
+            self._save_states(states)
+            return True
+
+    def release_lease(self, name: str, owner: str) -> None:
+        key = LEASE_PREFIX + name
+        with self._state_mutex():
+            states = self._load_states()
+            current = states.get(key)
+            if isinstance(current, dict) and current.get("owner") == owner:
+                del states[key]
+                self._save_states(states)
+
 
 class InMemoryIncidentStorage(_LocalIncidentStore):
     """Process-local incident storage (tests, demos, ``--backend memory``)."""
@@ -184,6 +230,12 @@ class JsonIncidentStorage(_LocalIncidentStore):
         self.file_path = Path(file_path)
         self.state_path = self.file_path.with_name(f"{self.file_path.stem}_state.json")
         ensure_file(self.file_path, "[]")
+
+    @contextmanager
+    def _state_mutex(self) -> Iterator[None]:
+        # Leases must be exclusive across processes (CLI loop vs. `serve`).
+        with _LEASE_LOCK, file_mutex(self.state_path):
+            yield
 
     def _load_incidents(self) -> list[dict[str, Any]]:
         return read_json(self.file_path, list, [])

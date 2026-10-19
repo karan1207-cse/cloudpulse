@@ -92,7 +92,7 @@ footer { text-align: center; padding: 1.5rem; }
 .badge .dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: currentColor; }
 .badge-healthy { background: var(--good-bg); color: var(--good); }
 .badge-unhealthy { background: var(--bad-bg); color: var(--bad); }
-.severity-critical { background: var(--bad); color: #fff; }
+.severity-critical { background: var(--bad); color: var(--bg); }
 .severity-high { background: var(--bad-bg); color: var(--bad); }
 .severity-medium { background: var(--warn-bg); color: var(--text); }
 .severity-low { background: var(--unknown-bg); color: var(--text); }
@@ -160,3 +160,68 @@ figure { margin: 0; }
   .topbar { flex-direction: column; align-items: flex-start; }
   th, td { padding: 0.4rem; }
 }
+
+/* ---- Actions, forms and notifications ---- */
+.button {
+  display: inline-flex; align-items: center; gap: 0.3rem; text-decoration: none;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  border-radius: 6px; padding: 0.35rem 0.8rem; font-weight: 500;
+}
+.primary, .button.primary {
+  background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+}
+@media (prefers-color-scheme: dark) {
+  .primary, .button.primary { color: #0f141a; }
+}
+.button.large { font-size: 1.1rem; padding: 0.6rem 1.2rem; }
+button.danger { border-color: var(--bad); color: var(--bad); }
+.confirm button.danger { background: var(--bad); color: var(--bg); border-color: var(--bad); }
+.toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0.5rem 0 1rem; }
+.actions.compact { margin: 0; }
+.actions.compact button, .actions.compact .button { padding: 0.2rem 0.55rem; font-size: 0.85rem; }
+.confirm {
+  flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
+  background: var(--bad-bg); border-radius: 6px; padding: 0.5rem 0.75rem;
+}
+.confirm p { margin: 0; flex-basis: 100%; }
+
+.lead { font-size: 1.05rem; max-width: 60ch; }
+.service-form { max-width: 640px; }
+.field { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 1rem; border: 0; padding: 0; }
+.field label, .field legend { font-weight: 600; }
+.field input, .field select {
+  font: inherit; padding: 0.5rem; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); width: 100%;
+}
+.field input[aria-invalid="true"] { border: 2px solid var(--bad); }
+.field input:disabled { opacity: 0.7; }
+.field.checkbox { flex-direction: row; align-items: center; gap: 0.5rem; }
+.field.checkbox input { width: auto; }
+.hint { margin: 0; color: var(--muted); font-size: 0.85rem; }
+.field-error { margin: 0; color: var(--bad); font-weight: 600; font-size: 0.9rem; }
+.form-error { background: var(--bad-bg); color: var(--bad); border-radius: 6px; padding: 0.6rem 0.8rem; margin-bottom: 1rem; font-weight: 600; }
+.advanced { margin-bottom: 1rem; border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.75rem; }
+.advanced summary { cursor: pointer; font-weight: 600; padding: 0.25rem 0; }
+.advanced-grid { display: grid; gap: 0 1rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-top: 0.75rem; }
+.range { display: flex; align-items: center; gap: 0.5rem; }
+.range input { width: 6rem; }
+.form-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.form-actions button { padding: 0.55rem 1.1rem; }
+
+.first-run { text-align: center; padding: 2rem 1rem; }
+.first-run h2 { font-size: 1.4rem; margin-bottom: 0.5rem; }
+.first-run p { max-width: 55ch; margin: 0 auto 1.25rem; }
+
+.toasts {
+  position: fixed; right: 1rem; bottom: 1rem; z-index: 20; display: flex; flex-direction: column;
+  gap: 0.5rem; max-width: min(420px, calc(100vw - 2rem));
+}
+.toast {
+  display: flex; gap: 0.75rem; align-items: flex-start; justify-content: space-between;
+  background: var(--surface); border: 1px solid var(--border); border-left: 5px solid var(--good);
+  border-radius: 8px; padding: 0.75rem 0.9rem; box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+}
+.toast-error { border-left-color: var(--bad); }
+.toast-info { border-left-color: var(--accent); }
+.toast-close { border: 0; background: none; font-size: 1.2rem; line-height: 1; padding: 0 0.2rem; }

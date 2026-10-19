@@ -30,9 +30,11 @@ Copy-Item terraform.tfvars.example terraform.tfvars    # git-ignored
 notepad terraform.tfvars
 ```
 
-Set `aws_region`, `environment`, and `services_json` (public URLs only — the
-Lambda runs with `CLOUDPULSE_ENV=production`, so loopback, private, link-local
-and metadata destinations are always blocked). Optional: `alert_email`,
+Set `aws_region` and `environment`. Services can be added later from the
+dashboard (stored in the `<prefix>-services` table); optionally pin some in
+`services_json` (public URLs only — the Lambda runs with
+`CLOUDPULSE_ENV=production`, so loopback, private, link-local and metadata
+destinations are always blocked). Optional: `alert_email`,
 `schedule_expression`, `enable_alarms`, `log_retention_days`,
 `history_retention_days`, `enable_point_in_time_recovery`,
 `enable_deletion_protection`, `reserved_concurrency`.
@@ -53,7 +55,7 @@ terraform validate
 terraform plan -out tfplan
 ```
 
-Expected resources: 3 DynamoDB tables, 1 Lambda function + async invoke
+Expected resources: 4 DynamoDB tables (history, incidents, state, services), 1 Lambda function + async invoke
 config + permission, 1 log group, 1 IAM role + inline policy, 1 managed
 policy (permissions boundary), 1 EventBridge rule + target, 1 SNS topic +
 policy (+ email subscription), up to 5 CloudWatch alarms, and the optional
@@ -92,13 +94,16 @@ $env:AWS_REGION = "<region>"
 $env:CLOUDPULSE_HEALTH_TABLE = terraform output -raw health_table_name
 $env:CLOUDPULSE_INCIDENTS_TABLE = terraform output -raw incidents_table_name
 $env:CLOUDPULSE_STATE_TABLE = terraform output -raw state_table_name
-$env:CLOUDPULSE_SERVICES_FILE = "services.json"   # same services as services_json
-cloudpulse status
-cloudpulse serve
+$env:CLOUDPULSE_SERVICES_TABLE = terraform output -raw services_table_name
+cloudpulse services list
+cloudpulse serve --static dashboard/dist      # add services in the dashboard
 ```
 
-Reading AWS data locally needs `dynamodb:GetItem` and `dynamodb:Query` on the
-tables (and indexes) for your own identity.
+With the `aws` backend, `serve` does not run background checks by default
+(the scheduled Lambda does); services you add are picked up by the Lambda on
+its next run, and **Check now** runs a check from your machine. Your own
+identity needs `dynamodb:GetItem`, `Query`, `Scan`, `PutItem`, `UpdateItem`
+and `DeleteItem` on the tables (and indexes).
 
 ## 7. Changing the schedule
 

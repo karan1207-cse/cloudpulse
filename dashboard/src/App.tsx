@@ -1,5 +1,7 @@
 import type { ReactElement } from "react";
 import { useApi } from "./api/context";
+import { AppStateProvider } from "./appState";
+import { AddServicePage, EditServicePage } from "./pages/ServiceFormPage";
 import { useHashRoute } from "./hooks";
 import { IncidentsPage } from "./pages/IncidentsPage";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -13,6 +15,12 @@ const NAV = [
 ];
 
 function resolve(path: string): { title: string; page: ReactElement } {
+  if (path === "/add") return { title: "Add a service", page: <AddServicePage /> };
+  const edit = /^\/services\/([^/]+)\/edit$/.exec(path);
+  if (edit?.[1]) {
+    const name = decodeURIComponent(edit[1]);
+    return { title: `Edit ${name}`, page: <EditServicePage key={name} name={name} /> };
+  }
   const detail = /^\/services\/([^/]+)$/.exec(path);
   if (detail?.[1]) {
     const name = decodeURIComponent(detail[1]);
@@ -32,10 +40,18 @@ function resolve(path: string): { title: string; page: ReactElement } {
 }
 
 export function App() {
+  return (
+    <AppStateProvider>
+      <Shell />
+    </AppStateProvider>
+  );
+}
+
+function Shell() {
   const api = useApi();
   const path = useHashRoute();
   const { title, page } = resolve(path);
-  const section = path.startsWith("/services") ? "/services" : path;
+  const section = path.startsWith("/services") || path === "/add" ? "/services" : path;
 
   return (
     <>

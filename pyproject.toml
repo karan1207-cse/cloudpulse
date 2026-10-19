@@ -30,6 +30,7 @@ markers = [
 ]
 filterwarnings = [
     "error::pytest.PytestUnraisableExceptionWarning",
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
 ]
 
 [tool.coverage.run]

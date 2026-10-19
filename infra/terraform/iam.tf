@@ -44,6 +44,12 @@ data "aws_iam_policy_document" "monitor" {
   }
 
   statement {
+    sid       = "ReadServices"
+    actions   = ["dynamodb:Scan", "dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.services.arn]
+  }
+
+  statement {
     sid       = "PublishAlerts"
     actions   = ["sns:Publish"]
     resources = [aws_sns_topic.alerts.arn]
@@ -67,6 +73,7 @@ data "aws_iam_policy_document" "boundary" {
       "dynamodb:PutItem",
       "dynamodb:UpdateItem",
       "dynamodb:Query",
+      "dynamodb:Scan",
     ]
     resources = [
       "arn:${local.partition}:dynamodb:${var.aws_region}:${local.account_id}:table/${local.name_prefix}-*",

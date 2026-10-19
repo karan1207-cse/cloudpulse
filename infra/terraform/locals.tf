@@ -13,6 +13,7 @@ locals {
   health_table_name    = "${local.name_prefix}-health-checks"
   incidents_table_name = "${local.name_prefix}-incidents"
   state_table_name     = "${local.name_prefix}-monitor-state"
+  services_table_name  = "${local.name_prefix}-services"
   function_name        = "${local.name_prefix}-monitor"
   log_group_name       = "/aws/lambda/${local.name_prefix}-monitor"
 

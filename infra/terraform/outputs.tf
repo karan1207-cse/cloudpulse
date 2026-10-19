@@ -33,6 +33,11 @@ output "state_table_name" {
   value       = aws_dynamodb_table.monitor_state.name
 }
 
+output "services_table_name" {
+  description = "CLOUDPULSE_SERVICES_TABLE"
+  value       = aws_dynamodb_table.services.name
+}
+
 output "email_subscription_pending_confirmation" {
   description = "True when an email subscription was requested; it stays pending until the recipient confirms it."
   value       = var.alert_email != null

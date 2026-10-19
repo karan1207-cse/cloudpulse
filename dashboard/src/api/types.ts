@@ -54,6 +54,76 @@ export interface ServiceSummary {
   last_error_type: string | null;
   consecutive_failures: number;
   current_incident: { id: string; severity: Severity; created_at: string } | null;
+  /** "config" = defined in the services file (read-only here); "dashboard" = added here. */
+  source?: "config" | "dashboard";
+  editable?: boolean;
+  escalation_threshold?: number | null;
+}
+
+/** What the form sends to POST/PUT /api/services. */
+export interface ServiceInput {
+  name: string;
+  url: string;
+  timeout_seconds: number;
+  failure_threshold: number;
+  severity: Severity;
+  accepted_status: [number, number];
+  enabled: boolean;
+}
+
+export interface SaveResult {
+  service: ServiceSummary;
+  warnings: string[];
+}
+
+export interface CheckOutcome {
+  service: string;
+  skipped: boolean;
+  reason: string | null;
+  transition: string;
+  is_healthy: boolean | null;
+  status_code: number | null;
+  response_time_ms: number | null;
+  error_type: string | null;
+}
+
+export interface CheckResult {
+  outcome: CheckOutcome | null;
+  failure: { service: string; error: string } | null;
+  service: ServiceSummary;
+}
+
+export interface CheckAllResult {
+  checked: number;
+  healthy: number;
+  unhealthy: number;
+  failures: { service: string; error: string }[];
+}
+
+export interface SchedulerStatus {
+  enabled: boolean;
+  interval_seconds?: number;
+  active_here?: boolean;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  last_error?: string | null;
+}
+
+export interface Health {
+  status: string;
+  backend: string;
+  can_write: boolean;
+  can_check: boolean;
+  auth_required: boolean;
+  service_store: boolean;
+  scheduler: SchedulerStatus;
+  limits: { max_services: number; services: number };
+  defaults: {
+    timeout_seconds: number;
+    failure_threshold: number;
+    severity: Severity;
+    accepted_status: [number, number];
+  };
 }
 
 export interface Overview {

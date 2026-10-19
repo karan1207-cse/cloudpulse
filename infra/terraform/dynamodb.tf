@@ -104,3 +104,25 @@ resource "aws_dynamodb_table" "monitor_state" {
     enabled = true
   }
 }
+
+# Services added through the dashboard/API (PK name). Read by the Lambda on
+# every run; at most 50 small items, so listing is a single-page Scan.
+resource "aws_dynamodb_table" "services" {
+  name                        = local.services_table_name
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "name"
+  deletion_protection_enabled = var.enable_deletion_protection
+
+  attribute {
+    name = "name"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = var.enable_point_in_time_recovery
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+}

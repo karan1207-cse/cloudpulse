@@ -17,6 +17,13 @@ from cloudpulse.notifications import (
     Notifier,
     SnsNotifier,
 )
+from cloudpulse.service_registry import ServiceRegistry
+from cloudpulse.service_store import (
+    DynamoDBServiceStore,
+    InMemoryServiceStore,
+    JsonServiceStore,
+    ServiceStore,
+)
 from cloudpulse.storage import HealthCheckStorage, IncidentStorage
 
 
@@ -61,6 +68,30 @@ def build_storage(
         state_table_name=config.state_table,
     )
     return history, incidents
+
+
+def build_service_store(
+    config: AppConfig, *, dynamodb: Any = None, clock: Clock = utc_now
+) -> ServiceStore | None:
+    """Where dashboard-managed services live; ``None`` means config-only."""
+    if config.backend == "memory":
+        return InMemoryServiceStore(clock)
+    if config.backend == "local":
+        return JsonServiceStore(config.data_dir / "services.json", clock)
+    if not config.services_table:
+        return None
+    from cloudpulse.aws_common import dynamodb_resource
+
+    resource = dynamodb or dynamodb_resource(config.aws_region)
+    return DynamoDBServiceStore(resource.Table(config.services_table), clock)
+
+
+def build_registry(
+    config: AppConfig, *, dynamodb: Any = None, clock: Clock = utc_now
+) -> ServiceRegistry:
+    return ServiceRegistry(
+        config, build_service_store(config, dynamodb=dynamodb, clock=clock)
+    )
 
 
 def build_notifier(config: AppConfig, *, sns_client: Any = None) -> Notifier:

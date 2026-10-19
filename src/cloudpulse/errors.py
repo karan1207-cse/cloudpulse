@@ -27,3 +27,21 @@ class ConcurrencyConflictError(StorageError):
 
 class NotificationError(CloudPulseError):
     """A notification could not be delivered."""
+
+
+class ServiceValidationError(ConfigError):
+    """A service definition is invalid; ``field`` names the offending input."""
+
+    def __init__(self, field: str | None, detail: str, where: str | None = None):
+        self.field = field
+        self.detail = detail
+        prefix = ".".join(part for part in (where, field) if part)
+        super().__init__(f"{prefix}: {detail}" if prefix else detail)
+
+
+class ServiceNotFoundError(CloudPulseError):
+    """No service with the given name exists."""
+
+
+class ServiceReadOnlyError(CloudPulseError):
+    """The service is defined in configuration and cannot be changed via the API."""

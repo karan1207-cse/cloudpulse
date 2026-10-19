@@ -4,6 +4,7 @@
 import type { CloudPulseApi } from "./client";
 import { ApiError } from "./errors";
 import type {
+  Health,
   HealthCheck,
   Incident,
   IncidentPage,
@@ -136,8 +137,35 @@ const incidents: Incident[] = [
   },
 ];
 
+const readOnly = () =>
+  Promise.reject(
+    new ApiError(
+      403,
+      "demo_read_only",
+      "Demo mode shows sample data only. Open the dashboard without ?demo=1 to add and check your own URLs.",
+    ),
+  );
+
 export const demoApi: CloudPulseApi = {
   demo: true,
+  async health(): Promise<Health> {
+    return {
+      status: "ok",
+      backend: "demo",
+      can_write: false,
+      can_check: false,
+      auth_required: false,
+      service_store: false,
+      scheduler: { enabled: false },
+      limits: { max_services: 50, services: services.length },
+      defaults: { timeout_seconds: 5, failure_threshold: 3, severity: "HIGH", accepted_status: [200, 399] },
+    };
+  },
+  createService: readOnly,
+  updateService: readOnly,
+  deleteService: readOnly,
+  checkService: readOnly,
+  checkAll: readOnly,
   async overview(): Promise<Overview> {
     return {
       generated_at: new Date(BASE).toISOString(),

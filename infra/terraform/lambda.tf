@@ -33,6 +33,7 @@ resource "aws_lambda_function" "monitor" {
       CLOUDPULSE_HEALTH_TABLE               = aws_dynamodb_table.health_checks.name
       CLOUDPULSE_INCIDENTS_TABLE            = aws_dynamodb_table.incidents.name
       CLOUDPULSE_STATE_TABLE                = aws_dynamodb_table.monitor_state.name
+      CLOUDPULSE_SERVICES_TABLE             = aws_dynamodb_table.services.name
       CLOUDPULSE_SNS_TOPIC_ARN              = aws_sns_topic.alerts.arn
       CLOUDPULSE_FAILURE_THRESHOLD          = tostring(var.failure_threshold)
       CLOUDPULSE_TIMEOUT_SECONDS            = tostring(var.check_timeout_seconds)

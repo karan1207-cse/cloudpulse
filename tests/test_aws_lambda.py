@@ -279,3 +279,24 @@ def test_emf_document_shape():
     assert doc["_aws"]["CloudWatchMetrics"][0]["Namespace"] == "CloudPulse"
     assert doc["_aws"]["CloudWatchMetrics"][0]["Dimensions"] == [["Environment"]]
     assert doc["ChecksFailed"] == 2
+
+
+def test_lambda_checks_services_added_from_dashboard(lambda_env, monkeypatch):
+    from cloudpulse.config import ServiceConfig
+    from cloudpulse.service_store import DynamoDBServiceStore
+    from conftest import SERVICES_TABLE
+
+    monkeypatch.setenv("CLOUDPULSE_SERVICES_TABLE", SERVICES_TABLE)
+    DynamoDBServiceStore(lambda_env["dynamodb"].Table(SERVICES_TABLE)).add_service(
+        ServiceConfig(name="added-in-ui", url="https://ui.example.com/")
+    )
+    aws_lambda._cache.clear()
+
+    with network(200):
+        result = aws_lambda.handler(SCHEDULED_EVENT, Context())
+
+    assert sorted(s["service"] for s in result["services"]) == [
+        "added-in-ui",
+        "api",
+        "web",
+    ]

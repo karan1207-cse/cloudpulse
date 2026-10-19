@@ -10,6 +10,7 @@ import {
   Timestamp,
 } from "../components/common";
 import { ResponseTimeChart } from "../components/ResponseTimeChart";
+import { ServiceActions } from "../components/ServiceActions";
 import { formatDuration, formatMs } from "../format";
 import { useAsync } from "../hooks";
 
@@ -30,7 +31,9 @@ export function ServiceDetailPage({ name }: { name: string }) {
       <header className="detail-header">
         <h2>{service.name}</h2>
         <StatusBadge status={service.status} />
+        {!service.enabled && <span className="badge">paused</span>}
       </header>
+      <ServiceActions service={service} onChanged={reload} />
       <dl className="facts">
         <div><dt>URL</dt><dd className="break">{service.url}</dd></div>
         <div><dt>Last check</dt><dd><Timestamp value={service.last_checked_at} /></dd></div>

@@ -17,6 +17,7 @@ and updated with ``UpdateItem`` + ``attribute_exists`` (no read-modify-write);
 state saves require the stored ``version`` to match.
 """
 
+from datetime import datetime
 from typing import Any
 
 from cloudpulse.aws_common import (
@@ -32,6 +33,7 @@ from cloudpulse.errors import ConcurrencyConflictError, StorageError
 from cloudpulse.incident_manager import Incident, incident_from_dict
 from cloudpulse.state import ServiceState
 
+LEASE_PREFIX = "__lease__:"
 SERVICE_INDEX = "service-created-index"
 STATUS_INDEX = "status-created-index"
 _IMMUTABLE_FIELDS = {"id"}
@@ -247,3 +249,49 @@ class DynamoDBIncidentStorage:
             raise ValueError("Failure count must be a non-negative integer.")
         state = self.get_state(service_url) or ServiceState(service=service_url)
         self.save_state(state.with_changes(consecutive_failures=count))
+
+    # -- leases ----------------------------------------------------------------
+
+    def acquire_lease(
+        self, name: str, owner: str, ttl_seconds: float, now: datetime
+    ) -> bool:
+        """Lease item ``service = "__lease__:<name>"`` in the state table."""
+        table = self._require_state_table()
+        now_epoch = int(now.timestamp())
+        try:
+            table.put_item(
+                Item={
+                    "service": LEASE_PREFIX + name,
+                    "owner": owner,
+                    "lease_expires_at": now_epoch + int(ttl_seconds),
+                },
+                ConditionExpression=(
+                    "attribute_not_exists(#s) OR #o = :owner OR #e < :now"
+                ),
+                ExpressionAttributeNames={
+                    "#s": "service",
+                    "#o": "owner",
+                    "#e": "lease_expires_at",
+                },
+                ExpressionAttributeValues={":owner": owner, ":now": now_epoch},
+            )
+        except ClientError as exc:
+            if error_code(exc) == "ConditionalCheckFailedException":
+                return False
+            raise StorageError(f"Acquiring lease failed: {error_code(exc)}") from exc
+        return True
+
+    def release_lease(self, name: str, owner: str) -> None:
+        table = self._require_state_table()
+        try:
+            table.delete_item(
+                Key={"service": LEASE_PREFIX + name},
+                ConditionExpression="#o = :owner",
+                ExpressionAttributeNames={"#o": "owner"},
+                ExpressionAttributeValues={":owner": owner},
+            )
+        except ClientError as exc:
+            if error_code(exc) != "ConditionalCheckFailedException":
+                raise StorageError(
+                    f"Releasing lease failed: {error_code(exc)}"
+                ) from exc

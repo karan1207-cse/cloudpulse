@@ -1,32 +1,49 @@
-"""Read-only JSON API consumed by the dashboard.
+"""JSON API consumed by the dashboard.
 
 The API is framework-free: :meth:`DashboardApi.handle` maps
-``(method, path, query)`` to ``(status, body)`` and is served by
-:mod:`cloudpulse.api_server`. It reads storage server-side, so the browser
-never needs AWS credentials. There are no write endpoints — monitored
-services come only from configuration, so the API cannot be used to register
-arbitrary targets.
+``(method, path, query, body, context)`` to ``(status, body)`` and is served
+by :mod:`cloudpulse.api_server`. It reads storage server-side, so the browser
+never needs AWS credentials.
 
-Routes (all ``GET``)::
+Read routes (``GET``)::
 
-    /api/health
+    /api/health                         capabilities, scheduler status, defaults
     /api/overview
     /api/services
     /api/services/{name}
     /api/services/{name}/checks?limit=
     /api/incidents?status=&severity=&service=&sort=&order=&page=&page_size=
     /api/incidents/{id}
+
+Write routes (only when the request context allows writes — see
+:mod:`cloudpulse.api_server` for the local-only / admin-token rules)::
+
+    POST   /api/services                add a service
+    PUT    /api/services/{name}         edit a service
+    DELETE /api/services/{name}         delete a service
+    POST   /api/services/{name}/check   check one service now
+    POST   /api/checks                  check all enabled services now
+
+Every URL is validated with the SSRF policy when saved (including DNS
+resolution) and again by the checker on every check and redirect.
 """
 
 import logging
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from cloudpulse.clock import Clock, to_utc_iso, utc_now
-from cloudpulse.config import NAME_PATTERN, AppConfig, ServiceConfig
-from cloudpulse.errors import StorageError
+from cloudpulse.config import MAX_SERVICES, NAME_PATTERN, AppConfig, ServiceConfig
+from cloudpulse.errors import (
+    ServiceNotFoundError,
+    ServiceReadOnlyError,
+    ServiceValidationError,
+    StorageError,
+)
 from cloudpulse.incident_manager import SEVERITIES, STATUSES
+from cloudpulse.service_registry import ServiceEntry, ServiceRegistry
 from cloudpulse.storage import HealthCheckStorage, IncidentStorage
 from cloudpulse.url_safety import redact_url
 
@@ -51,14 +68,39 @@ _PUBLIC_CHECK_FIELDS = (
     "error_type",
     "redirects",
 )
+WRITE_METHODS = ("POST", "PUT", "DELETE")
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str,
+        *,
+        field: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.field = field
+        self.headers = headers or {}
+
+    def body(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"error": self.code, "message": self.message}
+        if self.field is not None:
+            data["field"] = self.field
+        return data
+
+
+@dataclass(frozen=True)
+class RequestContext:
+    """Per-request permissions decided by the HTTP layer."""
+
+    can_write: bool = False
+    auth_required: bool = False
 
 
 Query = Mapping[str, list[str]]
@@ -130,6 +172,27 @@ def public_incident(record: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _object_body(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ApiError(400, "invalid_body", "The request body must be a JSON object.")
+    return body
+
+
+def _valid_name(name: str) -> str:
+    if not NAME_PATTERN.match(name):
+        raise ApiError(400, "invalid_parameter", "Invalid service name.")
+    return name
+
+
+def _not_allowed(allowed: tuple[str, ...]) -> ApiError:
+    return ApiError(
+        405,
+        "method_not_allowed",
+        f"Allowed methods: {', '.join(allowed)}.",
+        headers={"Allow": ", ".join(allowed)},
+    )
+
+
 class DashboardApi:
     def __init__(
         self,
@@ -137,92 +200,248 @@ class DashboardApi:
         history: HealthCheckStorage,
         incidents: IncidentStorage,
         clock: Clock = utc_now,
+        *,
+        registry: ServiceRegistry | None = None,
+        runner: Any = None,
+        scheduler: Any = None,
     ) -> None:
         self.config = config
         self.history = history
         self.incidents = incidents
         self.clock = clock
+        self.registry = registry or ServiceRegistry(config, None)
+        self.runner = runner
+        self.scheduler = scheduler
 
     # -- dispatch -----------------------------------------------------------
 
     def handle(
-        self, method: str, path: str, query: Query
+        self,
+        method: str,
+        path: str,
+        query: Query,
+        body: Any = None,
+        context: RequestContext | None = None,
     ) -> tuple[int, dict[str, Any]]:
-        try:
-            if method != "GET":
-                raise ApiError(405, "method_not_allowed", "Only GET is supported.")
-            return 200, self._route(path.rstrip("/") or "/", query)
-        except ApiError as exc:
-            return exc.status, {"error": exc.code, "message": exc.message}
-        except StorageError as exc:
-            logger.error("Storage error serving %s: %s", path, exc)
-            return 503, {
-                "error": "storage_unavailable",
-                "message": "Monitoring data is temporarily unavailable.",
-            }
-        except Exception:
-            logger.exception("Unhandled error serving %s", path)
-            return 500, {
-                "error": "internal_error",
-                "message": "Unexpected server error.",
-            }
+        status, payload, _ = self.handle_full(method, path, query, body, context)
+        return status, payload
 
-    def _route(self, path: str, query: Query) -> dict[str, Any]:
+    def handle_full(
+        self,
+        method: str,
+        path: str,
+        query: Query,
+        body: Any = None,
+        context: RequestContext | None = None,
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        """Like :meth:`handle` but also returns extra response headers."""
+        context = context or RequestContext()
+        try:
+            return (
+                *self._route(method, path.rstrip("/") or "/", query, body, context),
+                {},
+            )
+        except ApiError as exc:
+            return exc.status, exc.body(), exc.headers
+        except ServiceValidationError as exc:
+            return (
+                400,
+                ApiError(400, "validation_error", exc.detail, field=exc.field).body(),
+                {},
+            )
+        except ServiceNotFoundError as exc:
+            return 404, {"error": "not_found", "message": str(exc)}, {}
+        except ServiceReadOnlyError as exc:
+            return 409, {"error": "read_only", "message": str(exc)}, {}
+        except StorageError as exc:
+            logger.error("Storage error serving %s %s: %s", method, path, exc)
+            return (
+                503,
+                {
+                    "error": "storage_unavailable",
+                    "message": "Monitoring data is temporarily unavailable.",
+                },
+                {},
+            )
+        except Exception:
+            logger.exception("Unhandled error serving %s %s", method, path)
+            return (
+                500,
+                {
+                    "error": "internal_error",
+                    "message": "Unexpected server error.",
+                },
+                {},
+            )
+
+    def _require_write(self, context: RequestContext) -> None:
+        if context.can_write:
+            return
+        if context.auth_required:
+            raise ApiError(
+                401,
+                "unauthorized",
+                "An admin token is required to make changes on this server.",
+                headers={"WWW-Authenticate": 'Bearer realm="cloudpulse"'},
+            )
+        raise ApiError(
+            403,
+            "forbidden",
+            "Changes can only be made from the computer running CloudPulse.",
+        )
+
+    def _route(
+        self,
+        method: str,
+        path: str,
+        query: Query,
+        body: Any,
+        context: RequestContext,
+    ) -> tuple[int, dict[str, Any]]:
         parts = [p for p in path.split("/") if p]
         if parts[:1] != ["api"]:
             raise ApiError(404, "not_found", "Unknown endpoint.")
         parts = parts[1:]
+
+        def only(*allowed: str) -> None:
+            if method not in allowed:
+                raise _not_allowed(allowed)
+            if method in WRITE_METHODS:
+                self._require_write(context)
+
         if parts == ["health"]:
+            only("GET")
             _reject_unknown(query, set())
-            return {
-                "status": "ok",
-                "backend": self.config.backend,
-                "environment": self.config.environment,
-                "time": to_utc_iso(self.clock()),
-            }
+            return 200, self.health(context)
         if parts == ["overview"]:
+            only("GET")
             _reject_unknown(query, set())
-            return self.overview()
+            return 200, self.overview()
         if parts == ["services"]:
+            only("GET", "POST")
             _reject_unknown(query, set())
-            return {"items": [self.service_summary(s) for s in self.config.services]}
+            if method == "POST":
+                service, warnings = self.registry.create(_object_body(body))
+                return 201, self._saved(service, warnings)
+            return 200, {
+                "items": [self.service_summary(e) for e in self.registry.entries()]
+            }
+        if parts == ["checks"]:
+            only("POST")
+            _reject_unknown(query, set())
+            return 200, self.check_all()
         if len(parts) == 2 and parts[0] == "services":
+            only("GET", "PUT", "DELETE")
+            name = _valid_name(parts[1])
+            if method == "PUT":
+                _reject_unknown(query, set())
+                service, warnings = self.registry.update(name, _object_body(body))
+                return 200, self._saved(service, warnings)
+            if method == "DELETE":
+                _reject_unknown(query, set())
+                self.registry.delete(name)
+                return 200, {"deleted": name}
             _reject_unknown(query, {"limit"})
             limit = _int_param(query, "limit", 100, 1, MAX_CHECKS)
-            return self.service_detail(self._service(parts[1]), limit)
+            return 200, self.service_detail(self._entry(name), limit)
+        if len(parts) == 3 and parts[0] == "services" and parts[2] == "check":
+            only("POST")
+            _reject_unknown(query, set())
+            return 200, self.check_one(self._entry(_valid_name(parts[1])))
         if len(parts) == 3 and parts[0] == "services" and parts[2] == "checks":
+            only("GET")
             _reject_unknown(query, {"limit"})
-            service = self._service(parts[1])
+            entry = self._entry(_valid_name(parts[1]))
             limit = _int_param(query, "limit", 50, 1, MAX_CHECKS)
-            return {
+            return 200, {
                 "items": [
                     public_check(r)
-                    for r in self.history.get_recent(service.name, limit)
+                    for r in self.history.get_recent(entry.service.name, limit)
                 ]
             }
         if parts == ["incidents"]:
-            return self.list_incidents(query)
+            only("GET")
+            return 200, self.list_incidents(query)
         if len(parts) == 2 and parts[0] == "incidents":
+            only("GET")
             _reject_unknown(query, set())
             if not _ID_PATTERN.match(parts[1]):
                 raise ApiError(400, "invalid_parameter", "Invalid incident id.")
             record = self.incidents.get(parts[1])
             if record is None:
                 raise ApiError(404, "not_found", "Incident not found.")
-            return public_incident(record)
+            return 200, public_incident(record)
         raise ApiError(404, "not_found", "Unknown endpoint.")
 
     # -- views --------------------------------------------------------------
 
-    def _service(self, name: str) -> ServiceConfig:
-        if not NAME_PATTERN.match(name):
-            raise ApiError(400, "invalid_parameter", "Invalid service name.")
-        service = self.config.service(name)
-        if service is None:
+    def _entry(self, name: str) -> ServiceEntry:
+        entry = self.registry.get(name)
+        if entry is None:
             raise ApiError(404, "not_found", f"Service {name!r} is not configured.")
-        return service
+        return entry
 
-    def service_summary(self, service: ServiceConfig) -> dict[str, Any]:
+    def health(self, context: RequestContext) -> dict[str, Any]:
+        scheduler = (
+            self.scheduler.status()
+            if self.scheduler is not None
+            else {"enabled": False}
+        )
+        return {
+            "status": "ok",
+            "backend": self.config.backend,
+            "environment": self.config.environment,
+            "time": to_utc_iso(self.clock()),
+            "can_write": context.can_write and self.registry.can_store,
+            "can_check": context.can_write and self.runner is not None,
+            "auth_required": context.auth_required,
+            "service_store": self.registry.can_store,
+            "scheduler": scheduler,
+            "limits": {
+                "max_services": MAX_SERVICES,
+                "services": len(self.registry.entries()),
+            },
+            "defaults": {
+                "timeout_seconds": self.config.default_timeout,
+                "failure_threshold": self.config.default_failure_threshold,
+                "severity": "HIGH",
+                "accepted_status": [200, 399],
+            },
+        }
+
+    def _saved(self, service: ServiceConfig, warnings: list[str]) -> dict[str, Any]:
+        entry = self._entry(service.name)
+        return {"service": self.service_summary(entry), "warnings": warnings}
+
+    def _require_runner(self) -> Any:
+        if self.runner is None:
+            raise ApiError(
+                503, "checks_unavailable", "Checking is not available on this server."
+            )
+        return self.runner
+
+    def check_one(self, entry: ServiceEntry) -> dict[str, Any]:
+        summary = self._require_runner().check_service(entry.service.name)
+        outcome = summary.outcomes[0].to_dict() if summary.outcomes else None
+        return {
+            "outcome": outcome,
+            "failure": summary.failures[0] if summary.failures else None,
+            "service": self.service_summary(self._entry(entry.service.name)),
+        }
+
+    def check_all(self) -> dict[str, Any]:
+        summary = self._require_runner().check_all()
+        data = summary.to_dict()
+        return {
+            "checked": data["checked"],
+            "healthy": data["healthy"],
+            "unhealthy": data["unhealthy"],
+            "failures": data["failures"],
+            "services": data["services"],
+        }
+
+    def service_summary(self, entry: ServiceEntry) -> dict[str, Any]:
+        service = entry.service
         state = self.incidents.get_state(service.name)
         incident = None
         if state and state.active_incident_id:
@@ -241,6 +460,8 @@ class DashboardApi:
             status = "healthy"
         return {
             **service.to_public_dict(),
+            "source": entry.source,
+            "editable": entry.editable and self.registry.can_store,
             "status": status,
             "last_checked_at": (
                 to_utc_iso(state.last_checked_at)
@@ -255,27 +476,36 @@ class DashboardApi:
             "current_incident": incident,
         }
 
-    def service_detail(self, service: ServiceConfig, limit: int) -> dict[str, Any]:
-        checks = [public_check(r) for r in self.history.get_recent(service.name, limit)]
+    def service_detail(self, entry: ServiceEntry, limit: int) -> dict[str, Any]:
+        name = entry.service.name
+        checks = [public_check(r) for r in self.history.get_recent(name, limit)]
         incidents = [
             public_incident(r)
-            for r in self.incidents.list_incidents(service=service.name, limit=100)
+            for r in self.incidents.list_incidents(service=name, limit=100)
         ]
         return {
-            "service": self.service_summary(service),
+            "service": self.service_summary(entry),
             "checks": checks,
             "incidents": incidents,
         }
 
     def overview(self) -> dict[str, Any]:
-        summaries = [self.service_summary(s) for s in self.config.services]
+        entries = self.registry.entries()
+        names = {e.service.name for e in entries}
+        summaries = [self.service_summary(e) for e in entries]
         recent_checks: list[dict[str, Any]] = []
-        for service in self.config.services:
-            recent_checks.extend(self.history.get_recent(service.name, 10))
+        for entry in entries:
+            recent_checks.extend(self.history.get_recent(entry.service.name, 10))
         recent_checks.sort(key=lambda r: r.get("checked_at") or "", reverse=True)
-        open_incidents = self.incidents.list_incidents(
-            status="OPEN", limit=INCIDENT_SCAN_CAP
-        )
+        # Incidents of services that were deleted stay in the incident list
+        # but are not counted as currently open on the overview.
+        open_incidents = [
+            r
+            for r in self.incidents.list_incidents(
+                status="OPEN", limit=INCIDENT_SCAN_CAP
+            )
+            if (r.get("service_name") or r.get("service_url")) in names
+        ]
         recoveries = self.incidents.list_incidents(status="RECOVERED", limit=50)
         recoveries.sort(key=lambda r: r.get("recovered_at") or "", reverse=True)
         return {

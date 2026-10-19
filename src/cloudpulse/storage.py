@@ -5,6 +5,7 @@ the same signatures and return types; ``tests/test_storage_contract.py`` runs
 one shared test suite against each of them.
 """
 
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from cloudpulse.incident_manager import Incident
@@ -94,4 +95,17 @@ class IncidentStorage(Protocol):
 
     def count(self) -> int:
         """Return the number of stored incidents (never state records)."""
+        ...
+
+    def acquire_lease(
+        self, name: str, owner: str, ttl_seconds: float, now: datetime
+    ) -> bool:
+        """Take or renew an exclusive, expiring lease (e.g. "scheduler").
+
+        Returns True if ``owner`` now holds it; False if someone else does.
+        """
+        ...
+
+    def release_lease(self, name: str, owner: str) -> None:
+        """Release the lease if ``owner`` holds it."""
         ...

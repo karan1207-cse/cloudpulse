@@ -143,7 +143,10 @@ describe("App", () => {
 
     fail = false;
     await userEvent.click(within(alert).getByRole("button", { name: "Retry" }));
-    expect(await screen.findByText(/No services are configured/)).toBeInTheDocument();
+    // Empty state is now the first-run call to action.
+    expect(
+      await screen.findByRole("heading", { name: "Add your first URL to monitor" }),
+    ).toBeInTheDocument();
     expect(overview).toHaveBeenCalledTimes(2);
   });
 

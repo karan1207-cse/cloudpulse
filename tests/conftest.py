@@ -22,6 +22,8 @@ for _var in ("AWS_PROFILE", "CLOUDPULSE_SNS_TOPIC_ARN"):
 HEALTH_TABLE = "cloudpulse-test-health-checks"
 INCIDENTS_TABLE = "cloudpulse-test-incidents"
 STATE_TABLE = "cloudpulse-test-monitor-state"
+SERVICES_TABLE = "cloudpulse-test-services"
+PUBLIC_IP = "93.184.215.14"
 
 
 @pytest.fixture
@@ -164,6 +166,12 @@ def create_tables(dynamodb: Any) -> None:
         ],
     )
     dynamodb.create_table(
+        TableName=SERVICES_TABLE,
+        BillingMode="PAY_PER_REQUEST",
+        AttributeDefinitions=[{"AttributeName": "name", "AttributeType": "S"}],
+        KeySchema=[{"AttributeName": "name", "KeyType": "HASH"}],
+    )
+    dynamodb.create_table(
         TableName=STATE_TABLE,
         BillingMode="PAY_PER_REQUEST",
         AttributeDefinitions=[{"AttributeName": "service", "AttributeType": "S"}],
@@ -196,6 +204,44 @@ def sns_topic(aws_mock: None) -> tuple[Any, str]:
     return client, arn
 
 
+def _is_ip_literal(host: str) -> bool:
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+class FakeDns:
+    """Deterministic DNS: every host resolves to a public IP unless mapped."""
+
+    def __init__(self, real) -> None:
+        self.real = real
+        self.mapping: dict[str, list[str] | Exception] = {}
+
+    def __call__(self, host, port, *args, **kwargs):
+        if host not in self.mapping and (
+            host in ("localhost", None) or _is_ip_literal(str(host))
+        ):
+            # Real resolution for loopback/IP literals (test servers, clients).
+            return self.real(host, port, *args, **kwargs)
+        answer = self.mapping.get(host, [PUBLIC_IP])
+        if isinstance(answer, Exception):
+            raise answer
+        return [(2, 1, 6, "", (ip, port)) for ip in answer]
+
+
+@pytest.fixture
+def fake_dns(monkeypatch) -> FakeDns:
+    import socket
+
+    dns = FakeDns(socket.getaddrinfo)
+    monkeypatch.setattr("cloudpulse.url_safety.socket.getaddrinfo", dns)
+    return dns
+
+
 @pytest.fixture
 def failing_notifier() -> MagicMock:
     notifier = MagicMock()
@@ -206,7 +252,9 @@ def failing_notifier() -> MagicMock:
 __all__ = [
     "HEALTH_TABLE",
     "INCIDENTS_TABLE",
+    "SERVICES_TABLE",
     "STATE_TABLE",
+    "FakeDns",
     "FakeTransport",
     "ScriptedChecker",
     "URLError",

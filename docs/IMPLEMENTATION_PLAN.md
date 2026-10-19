@@ -115,6 +115,7 @@ dashboard must talk to a real backend.
 | 7 API + dashboard | read-only API with validation/tests; React+TS dashboard with 4 pages, filters, sorting, pagination, demo mode clearly labelled | Done |
 | 8 Terraform + CI | tables/GSIs, Lambda, IAM, EventBridge, SNS, logs, alarms, outputs; CI for Python, frontend, Terraform; manual deploy workflow with OIDC | Written and HCL-parsed; **`fmt -check`/`validate` not run locally** (Terraform not installed) — they run in CI. **Not deployed.** |
 | 9 Security + docs | SSRF guard with DNS + connected-peer validation, redirect re-validation, docs | Done |
+| 10 Service management | Add/edit/delete URLs and check now from the dashboard; background checks in `serve`; one service list for CLI, API and Lambda (JSON/DynamoDB store, services file still supported); local-only or admin-token writes; CSRF/DNS-rebinding/size/rate limits | Done (DynamoDB store mock-tested; not deployed) |
 
 ## 4. Bugs fixed (each has a regression test)
 
@@ -134,6 +135,9 @@ dashboard must talk to a real backend.
 | 12 | Equal timestamps returned oldest history record first | Ties broken by insertion order | `test_recent_ordering_breaks_timestamp_ties_by_insertion` |
 | 13 | State `last_checked_at` differed from the check's own timestamp | State uses the check timestamp | `test_state_timestamp_matches_check_timestamp` |
 | 14 | CLI turned storage `ValueError` into usage errors; no exit codes | Typed errors → exit codes 0/1/2/3/130 | `test_cli_commands.py` |
+| 15 | `cloudpulse check <url>` failed when the unrelated services file was invalid | One-off commands skip loading services | `test_check_ignores_unrelated_services_file` |
+| 16 | On Windows, writing a JSON file failed ("Access is denied") while another thread read it — triggered by the API and scheduler sharing `serve` | Retry `os.replace` briefly on sharing violations | `test_write_retries_transient_windows_sharing_violation`, `test_concurrent_acquire_has_single_winner` |
+| 17 | Dark-mode contrast: white text on light red for CRITICAL badges and the delete confirmation | Use the background colour for text on red | manual check |
 
 ## 5. Remaining work / not done
 
@@ -141,7 +145,8 @@ dashboard must talk to a real backend.
   installed here); CI is configured to do it.
 - No AWS deployment has been made; nothing has been verified against real
   AWS services.
-- API authentication (needed before exposing the API beyond localhost).
+- Reads are unauthenticated (by design for localhost); a single admin token
+  protects writes — there are no user accounts.
 - Pin GitHub Actions to commit SHAs.
 - Optional: a deployed, authenticated read API (e.g. API Gateway + Cognito)
   if the dashboard must be hosted.

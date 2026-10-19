@@ -26,12 +26,13 @@ variable "environment" {
 }
 
 variable "services_json" {
-  description = "JSON list of services to monitor (same format as services.example.json). Do not put secrets in URLs."
+  description = "Optional JSON list of services fixed in configuration (same format as services.example.json). Services can also be added from the dashboard into the services table. Do not put secrets in URLs."
   type        = string
+  default     = "[]"
 
   validation {
-    condition     = can(length(jsondecode(var.services_json))) && length(jsondecode(var.services_json)) > 0
-    error_message = "services_json must be a non-empty JSON list."
+    condition     = can(tolist(jsondecode(var.services_json)))
+    error_message = "services_json must be a JSON list (use [] for none)."
   }
 }
 

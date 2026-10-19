@@ -21,9 +21,10 @@ from typing import Any
 
 from cloudpulse.config import AppConfig, load_config
 from cloudpulse.errors import ConfigError
-from cloudpulse.factory import Dependencies, build_dependencies
+from cloudpulse.factory import Dependencies, build_dependencies, build_registry
 from cloudpulse.observability import configure_logging, emit_metrics
 from cloudpulse.runner import run_services
+from cloudpulse.service_registry import ServiceRegistry
 
 logger = logging.getLogger("cloudpulse.lambda")
 
@@ -35,11 +36,12 @@ class InvalidEventError(ValueError):
     """The Lambda event does not have a supported shape."""
 
 
-def select_services(event: Any, config: AppConfig) -> list:
+def select_services(event: Any, config: AppConfig, enabled: list | None = None) -> list:
     """Validate the event and return the services it asks to check."""
     if not isinstance(event, dict):
         raise InvalidEventError("Event must be a JSON object.")
-    enabled = list(config.enabled_services)
+    if enabled is None:
+        enabled = list(config.enabled_services)
     if event.get("source") == "aws.events":
         return enabled
     unknown = set(event) - _ALLOWED_MANUAL_KEYS
@@ -61,13 +63,14 @@ def select_services(event: Any, config: AppConfig) -> list:
     return [by_name[name] for name in dict.fromkeys(requested)]
 
 
-def _dependencies(config: AppConfig) -> Dependencies:
+def _dependencies(config: AppConfig) -> tuple[Dependencies, ServiceRegistry]:
     """Reuse AWS clients across warm invocations."""
     key = repr(config)
     if _cache.get("key") != key:
         _cache["deps"] = build_dependencies(config)
+        _cache["registry"] = build_registry(config)
         _cache["key"] = key
-    return _cache["deps"]
+    return _cache["deps"], _cache["registry"]
 
 
 def handler(event: Any, context: Any) -> dict[str, Any]:
@@ -83,12 +86,13 @@ def handler(event: Any, context: Any) -> dict[str, Any]:
         raise ConfigError("Lambda must run with CLOUDPULSE_BACKEND=aws.")
 
     try:
-        services = select_services(event, config)
+        deps, registry = _dependencies(config)
+        # Services from CLOUDPULSE_SERVICES plus the services table (if set).
+        services = select_services(event, config, registry.enabled_services())
     except InvalidEventError as exc:
         logger.error("Rejected event: %s", exc, extra={"request_id": request_id})
         return {"ok": False, "error": "invalid_event", "detail": str(exc)}
 
-    deps = _dependencies(config)
     remaining = getattr(context, "get_remaining_time_in_millis", None)
     summary = run_services(services, deps, config, remaining_time_ms=remaining)
     result = summary.to_dict()

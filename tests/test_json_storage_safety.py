@@ -92,3 +92,43 @@ def test_storage_creates_nested_directories(tmp_path):
     storage = JsonIncidentStorage(tmp_path / "a" / "b" / "incidents.json")
 
     assert storage.count() == 0
+
+
+def test_write_retries_transient_windows_sharing_violation(tmp_path, monkeypatch):
+    # Regression: on Windows os.replace fails with "Access is denied" while
+    # another thread (e.g. an API request) has the file open.
+    import os
+
+    storage = JsonHealthCheckStorage(tmp_path / "history.json")
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(13, "Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr("cloudpulse.jsonfile.os.replace", flaky_replace)
+    monkeypatch.setattr("cloudpulse.jsonfile.time.sleep", lambda _: None)
+
+    storage.add({"id": "1"})
+
+    assert storage.count() == 1
+    assert calls["n"] == 3
+
+
+def test_persistent_permission_error_is_a_storage_error(tmp_path, monkeypatch):
+    from cloudpulse.errors import StorageError
+
+    storage = JsonHealthCheckStorage(tmp_path / "history.json")
+
+    def denied(src, dst):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr("cloudpulse.jsonfile.os.replace", denied)
+    monkeypatch.setattr("cloudpulse.jsonfile.time.sleep", lambda _: None)
+
+    with pytest.raises(StorageError, match="Cannot write"):
+        storage.add({"id": "1"})
+    assert [p.name for p in tmp_path.iterdir()] == ["history.json"]

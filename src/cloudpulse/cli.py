@@ -20,14 +20,20 @@ from pathlib import Path
 from typing import Any
 
 from cloudpulse.config import BACKENDS, AppConfig, load_config
-from cloudpulse.errors import ConfigError, StorageError
-from cloudpulse.factory import build_dependencies, build_storage
+from cloudpulse.errors import (
+    ConfigError,
+    ServiceNotFoundError,
+    ServiceReadOnlyError,
+    StorageError,
+)
+from cloudpulse.factory import build_dependencies, build_registry, build_storage
 from cloudpulse.health_check import HttpHealthChecker
 from cloudpulse.incident_manager import SEVERITIES, STATUSES
 from cloudpulse.incident_storage import JsonIncidentStorage
 from cloudpulse.json_storage import JsonHealthCheckStorage
 from cloudpulse.monitor import MonitoringService
 from cloudpulse.observability import configure_logging
+from cloudpulse.service_registry import ServiceRegistry
 from cloudpulse.url_safety import redact_url
 
 EXIT_OK = 0
@@ -44,6 +50,7 @@ COMMANDS = (
     "incidents",
     "history",
     "serve",
+    "services",
     "config",
 )
 
@@ -195,7 +202,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--allow-remote",
         action="store_true",
-        help="allow binding to a non-loopback address (no auth!)",
+        help=(
+            "allow binding to a non-loopback address; requires "
+            "CLOUDPULSE_ADMIN_TOKEN for changes"
+        ),
+    )
+    p.add_argument(
+        "--scheduler",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "background checks while serving (auto: on for local/memory "
+            "backends, off for aws where Lambda checks)"
+        ),
+    )
+    p.add_argument(
+        "--check-interval",
+        type=_positive_float,
+        help="seconds between background checks (default 60, min 10)",
+    )
+
+    p = sub.add_parser("services", parents=[common], help="list or manage services")
+    services_sub = p.add_subparsers(dest="services_action", required=True)
+    sp = services_sub.add_parser("list", help="list services and where they come from")
+    sp.add_argument("--json", action="store_true")
+    sp = services_sub.add_parser("add", help="add a service")
+    sp.add_argument("name")
+    sp.add_argument("url")
+    sp.add_argument("--timeout", type=_positive_float, help="seconds (default 5)")
+    sp.add_argument("--threshold", type=int, help="failures before an incident")
+    sp.add_argument("--severity", choices=SEVERITIES, type=str.upper)
+    sp.add_argument("--accepted-status", type=_status_range, metavar="LOW-HIGH")
+    sp = services_sub.add_parser("remove", help="delete a service")
+    sp.add_argument("name")
+    services_sub.add_parser(
+        "import", help="copy services from the services file into the store"
     )
 
     p = sub.add_parser(
@@ -270,32 +311,63 @@ def cmd_check(args: argparse.Namespace, config: AppConfig) -> int:
     return EXIT_OK if result["is_healthy"] else EXIT_UNHEALTHY
 
 
-def _selected_services(args: argparse.Namespace, config: AppConfig) -> list:
-    if not config.services:
-        raise ConfigError(
-            "No services configured. Set CLOUDPULSE_SERVICES_FILE or pass "
-            "--services-file "
-            "(see services.example.json)."
-        )
+NO_SERVICES_MESSAGE = (
+    "No services configured yet. Add one in the dashboard (cloudpulse serve), "
+    "with `cloudpulse services add NAME URL`, or set CLOUDPULSE_SERVICES_FILE "
+    "(see services.example.json)."
+)
+
+
+def _selected_services(
+    args: argparse.Namespace, registry: ServiceRegistry, *, enabled_only: bool = True
+) -> list:
+    services = registry.services()
+    if not services:
+        raise ConfigError(NO_SERVICES_MESSAGE)
     if not getattr(args, "service", None):
-        return list(config.enabled_services)
+        return [s for s in services if s.enabled] if enabled_only else services
+    by_name = {s.name: s for s in services}
     selected = []
     for name in args.service:
-        service = config.service(name)
-        if service is None:
+        if name not in by_name:
             raise ConfigError(f"Unknown service: {name}")
-        selected.append(service)
+        selected.append(by_name[name])
     return selected
 
 
 def cmd_run(args: argparse.Namespace, config: AppConfig) -> int:
-    from cloudpulse.runner import run_services
+    from cloudpulse.scheduler import SCHEDULER_LEASE, lease_owner_id
 
-    services = _selected_services(args, config)
+    registry = build_registry(config)
+    services = _selected_services(args, registry)
     deps = build_dependencies(config)
+    owner = lease_owner_id("cli")
+    try:
+        return _run_rounds(args, config, registry, deps, services, owner)
+    finally:
+        if args.loop:
+            deps.incidents.release_lease(SCHEDULER_LEASE, owner)
+
+
+def _run_rounds(args, config, registry, deps, services, owner) -> int:
+    from cloudpulse.runner import run_services
+    from cloudpulse.scheduler import SCHEDULER_LEASE, lease_ttl
+
     round_number = 0
     while True:
         round_number += 1
+        if args.loop:
+            if not getattr(args, "service", None):
+                services = registry.enabled_services()  # pick up new services
+            ttl = lease_ttl(args.interval, services)
+            if not deps.incidents.acquire_lease(
+                SCHEDULER_LEASE, owner, ttl, deps.clock()
+            ):
+                raise ConfigError(
+                    "Another CloudPulse scheduler is already checking these "
+                    "services (for example `cloudpulse serve`). Stop it first, "
+                    "or use the dashboard's automatic checks instead."
+                )
         summary = run_services(services, deps, config)
         if args.json:
             _print_json(summary.to_dict())
@@ -377,8 +449,12 @@ def cmd_status(args: argparse.Namespace, config: AppConfig) -> int:
     from cloudpulse.api import DashboardApi
 
     history, incidents = build_storage(config)
-    api = DashboardApi(config, history, incidents)
-    summaries = [api.service_summary(s) for s in _selected_services(args, config)]
+    registry = build_registry(config)
+    api = DashboardApi(config, history, incidents, registry=registry)
+    names = {s.name for s in _selected_services(args, registry, enabled_only=False)}
+    summaries = [
+        api.service_summary(e) for e in registry.entries() if e.service.name in names
+    ]
     if args.json:
         _print_json(summaries)
     else:
@@ -456,7 +532,12 @@ def cmd_history(args: argparse.Namespace, config: AppConfig) -> int:
     names = (
         [args.service]
         if args.service
-        else [s.name for s in _selected_services(args, config)]
+        else [
+            s.name
+            for s in _selected_services(
+                args, build_registry(config), enabled_only=False
+            )
+        ]
     )
     records: list[dict[str, Any]] = []
     for name in names:
@@ -488,9 +569,26 @@ def cmd_history(args: argparse.Namespace, config: AppConfig) -> int:
 def cmd_serve(args: argparse.Namespace, config: AppConfig) -> int:
     from cloudpulse.api import DashboardApi
     from cloudpulse.api_server import create_server
+    from cloudpulse.scheduler import BackgroundScheduler, MonitorRunner
 
-    history, incidents = build_storage(config)
-    api = DashboardApi(config, history, incidents)
+    deps = build_dependencies(config)
+    registry = build_registry(config)
+    runner = MonitorRunner(registry, deps, config)
+    scheduler_on = args.scheduler == "on" or (
+        args.scheduler == "auto" and config.backend in ("local", "memory")
+    )
+    interval = args.check_interval or config.check_interval_seconds
+    if interval < 10:
+        raise ConfigError("--check-interval must be at least 10 seconds")
+    scheduler = BackgroundScheduler(runner, interval) if scheduler_on else None
+    api = DashboardApi(
+        config,
+        deps.history,
+        deps.incidents,
+        registry=registry,
+        runner=runner,
+        scheduler=scheduler,
+    )
     host = args.host or config.api_host
     port = args.port or config.api_port
     try:
@@ -501,19 +599,87 @@ def cmd_serve(args: argparse.Namespace, config: AppConfig) -> int:
             allowed_origins=config.cors_origins,
             static_dir=args.static,
             allow_remote=args.allow_remote,
+            admin_token=config.admin_token,
         )
     except (ValueError, OSError) as exc:
         raise ConfigError(str(exc)) from exc
-    print(
-        f"CloudPulse API listening on http://{host}:{port}/api "
-        f"(backend: {config.backend})"
-    )
+    base = f"http://{host}:{port}"
+    print(f"CloudPulse is running (backend: {config.backend}).")
+    if args.static:
+        print(f"  Dashboard: {base}/")
+    print(f"  API:       {base}/api")
+    if scheduler is not None:
+        print(f"  Automatic checks every {interval:g} seconds.")
+    else:
+        print("  Automatic checks are off (--scheduler on to enable).")
+    if config.admin_token:
+        print("  Changes require the admin token (CLOUDPULSE_ADMIN_TOKEN).")
+    else:
+        print("  Changes are allowed from this computer only.")
+    print("Press Ctrl+C to stop.")
+    if scheduler is not None:
+        scheduler.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nServer stopped.")
     finally:
+        if scheduler is not None:
+            scheduler.stop()
         server.server_close()
+    return EXIT_OK
+
+
+def cmd_services(args: argparse.Namespace, config: AppConfig) -> int:
+    registry = build_registry(config)
+    action = args.services_action
+    if action == "list":
+        entries = registry.entries()
+        if args.json:
+            _print_json(
+                [{**e.service.to_public_dict(), "source": e.source} for e in entries]
+            )
+        elif not entries:
+            print(NO_SERVICES_MESSAGE)
+        else:
+            _table(
+                [
+                    [
+                        e.service.name,
+                        redact_url(e.service.url),
+                        "yes" if e.service.enabled else "no",
+                        e.service.severity,
+                        e.source,
+                    ]
+                    for e in entries
+                ],
+                ["NAME", "URL", "ENABLED", "SEVERITY", "SOURCE"],
+            )
+        return EXIT_OK
+    if action == "add":
+        data: dict[str, Any] = {"name": args.name, "url": args.url}
+        if args.timeout is not None:
+            data["timeout_seconds"] = args.timeout
+        if args.threshold is not None:
+            data["failure_threshold"] = args.threshold
+        if args.severity:
+            data["severity"] = args.severity
+        if args.accepted_status:
+            data["accepted_status"] = list(args.accepted_status)
+        service, warnings = registry.create(data)
+        print(f"Added {service.name} ({redact_url(service.url)}).")
+        for warning in warnings:
+            print(f"Warning: {warning}")
+        return EXIT_OK
+    if action == "remove":
+        registry.delete(args.name)
+        print(f"Removed {args.name}.")
+        return EXIT_OK
+    imported = registry.import_config_services()
+    print(
+        f"Imported {len(imported)} service(s)"
+        + (f": {', '.join(imported)}" if imported else ".")
+    )
     return EXIT_OK
 
 
@@ -530,6 +696,8 @@ def cmd_config(args: argparse.Namespace, config: AppConfig) -> int:
             "state": config.state_table,
         },
         "sns_topic_configured": bool(config.sns_topic_arn),
+        "admin_token_configured": bool(config.admin_token),
+        "check_interval_seconds": config.check_interval_seconds,
         "services": [s.to_public_dict() for s in config.services],
     }
     if args.action == "show":
@@ -550,6 +718,7 @@ HANDLERS = {
     "incidents": cmd_incidents,
     "history": cmd_history,
     "serve": cmd_serve,
+    "services": cmd_services,
     "config": cmd_config,
 }
 
@@ -569,6 +738,9 @@ def main(argv: list[str] | None = None) -> int:
         return HANDLERS[args.command](args, config)
     except ConfigError as exc:
         print(f"cloudpulse: configuration error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    except (ServiceNotFoundError, ServiceReadOnlyError) as exc:
+        print(f"cloudpulse: error: {exc}", file=sys.stderr)
         return EXIT_USAGE
     except ValueError as exc:
         print(f"cloudpulse: error: {exc}", file=sys.stderr)

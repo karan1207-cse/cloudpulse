@@ -1,10 +1,16 @@
+import { getAdminToken } from "./auth";
 import { demoApi } from "./demo";
 import { ApiError } from "./errors";
 import type {
+  CheckAllResult,
+  CheckResult,
+  Health,
   IncidentPage,
   IncidentQuery,
   Overview,
+  SaveResult,
   ServiceDetail,
+  ServiceInput,
   ServiceSummary,
 } from "./types";
 
@@ -12,13 +18,21 @@ export { ApiError };
 
 export interface CloudPulseApi {
   readonly demo: boolean;
+  health(signal?: AbortSignal): Promise<Health>;
   overview(signal?: AbortSignal): Promise<Overview>;
   services(signal?: AbortSignal): Promise<ServiceSummary[]>;
   service(name: string, signal?: AbortSignal): Promise<ServiceDetail>;
   incidents(query: IncidentQuery, signal?: AbortSignal): Promise<IncidentPage>;
+  createService(input: ServiceInput): Promise<SaveResult>;
+  updateService(name: string, input: ServiceInput): Promise<SaveResult>;
+  deleteService(name: string): Promise<void>;
+  checkService(name: string): Promise<CheckResult>;
+  checkAll(): Promise<CheckAllResult>;
 }
 
 const REQUEST_TIMEOUT_MS = 10_000;
+// "Check all" can take a while (each service may use its full timeout).
+const CHECK_TIMEOUT_MS = 5 * 60_000;
 
 function buildQuery(query: object): string {
   const params = new URLSearchParams();
@@ -31,16 +45,32 @@ function buildQuery(query: object): string {
   return text ? `?${text}` : "";
 }
 
+interface RequestOptions {
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  body?: unknown;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 export function createHttpApi(baseUrl = "", fetchImpl: typeof fetch = fetch): CloudPulseApi {
-  async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    const { method = "GET", body, signal, timeoutMs = REQUEST_TIMEOUT_MS } = options;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onAbort = () => controller.abort();
     signal?.addEventListener("abort", onAbort);
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (method !== "GET") {
+      headers["Content-Type"] = "application/json";
+      const token = getAdminToken();
+      if (token) headers.Authorization = `Bearer ${token}`;
+    }
     let response: Response;
     try {
       response = await fetchImpl(`${baseUrl}${path}`, {
-        headers: { Accept: "application/json" },
+        method,
+        headers,
+        body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
         signal: controller.signal,
         credentials: "same-origin",
       });
@@ -51,43 +81,60 @@ export function createHttpApi(baseUrl = "", fetchImpl: typeof fetch = fetch): Cl
         0,
         timedOut ? "timeout" : "network_error",
         timedOut
-          ? "The CloudPulse API did not respond in time."
-          : "Cannot reach the CloudPulse API. Is `cloudpulse serve` running?",
+          ? "The CloudPulse server did not respond in time."
+          : "Cannot reach the CloudPulse server. Is `cloudpulse serve` running?",
       );
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
     }
 
-    let body: unknown = null;
+    let data: unknown = null;
     try {
-      body = await response.json();
+      data = await response.json();
     } catch {
-      body = null;
+      data = null;
     }
     if (!response.ok) {
-      const data = (body ?? {}) as { error?: string; message?: string };
+      const error = (data ?? {}) as { error?: string; message?: string; field?: string };
       throw new ApiError(
         response.status,
-        data.error ?? "http_error",
-        data.message ?? `Request failed with HTTP ${response.status}.`,
+        error.error ?? "http_error",
+        error.message ?? `Request failed with HTTP ${response.status}.`,
+        error.field,
       );
     }
-    if (body === null) {
+    if (data === null) {
       throw new ApiError(response.status, "invalid_response", "The API returned invalid JSON.");
     }
-    return body as T;
+    return data as T;
   }
+
+  const servicePath = (name: string) => `/api/services/${encodeURIComponent(name)}`;
 
   return {
     demo: false,
-    overview: (signal) => get<Overview>("/api/overview", signal),
+    health: (signal) => request<Health>("/api/health", { signal }),
+    overview: (signal) => request<Overview>("/api/overview", { signal }),
     services: async (signal) =>
-      (await get<{ items: ServiceSummary[] }>("/api/services", signal)).items,
-    service: (name, signal) =>
-      get<ServiceDetail>(`/api/services/${encodeURIComponent(name)}`, signal),
+      (await request<{ items: ServiceSummary[] }>("/api/services", { signal })).items,
+    service: (name, signal) => request<ServiceDetail>(servicePath(name), { signal }),
     incidents: (query, signal) =>
-      get<IncidentPage>(`/api/incidents${buildQuery(query)}`, signal),
+      request<IncidentPage>(`/api/incidents${buildQuery(query)}`, { signal }),
+    createService: (input) =>
+      request<SaveResult>("/api/services", { method: "POST", body: input }),
+    updateService: (name, input) =>
+      request<SaveResult>(servicePath(name), { method: "PUT", body: input }),
+    deleteService: async (name) => {
+      await request(servicePath(name), { method: "DELETE" });
+    },
+    checkService: (name) =>
+      request<CheckResult>(`${servicePath(name)}/check`, {
+        method: "POST",
+        timeoutMs: CHECK_TIMEOUT_MS,
+      }),
+    checkAll: () =>
+      request<CheckAllResult>("/api/checks", { method: "POST", timeoutMs: CHECK_TIMEOUT_MS }),
   };
 }
 

@@ -21,6 +21,8 @@ dependencies; AWS services are adapters around it.
 | Storage | `storage.py` + adapters | Protocols; in-memory, JSON, DynamoDB implementations |
 | Notifications | `notifications.py` | Message formatting; logging, SNS, composite notifiers |
 | Configuration | `config.py`, `factory.py` | Env/services-file validation; backend wiring |
+| Service list | `service_store.py`, `service_registry.py` | Dashboard-managed services (memory/JSON/DynamoDB) merged with services-file entries; field-level validation and SSRF pre-check |
+| Scheduling | `scheduler.py` | "Check now" runner (one run at a time per process) and the background scheduler of `serve`, guarded by a storage lease |
 | Entry points | `cli.py`, `aws_lambda.py`, `api_server.py` | CLI, Lambda handler, local HTTP server |
 | API | `api.py` | Read-only JSON views for the dashboard |
 | Observability | `observability.py` | JSON logs, CloudWatch EMF metrics |
@@ -129,6 +131,33 @@ read and upgraded. Single-process use.
 - `status-created-index` has only two partition values. That is fine at this
   scale; for very high incident volumes, shard the key (e.g. by month).
 
+### Services
+
+| Store | Location | Notes |
+| --- | --- | --- |
+| JSON | `data/services.json` | `{name: record}`, atomic writes |
+| DynamoDB | `<prefix>-services`, PK `name` | conditional create/replace; listing is a one-page `Scan` (≤ 50 items) |
+
+`ServiceRegistry` merges *config* services (services file / `CLOUDPULSE_SERVICES`,
+read-only through the API) with *dashboard* services from the store; a name
+defined in both uses the config entry. The CLI, the API, the background
+scheduler and the Lambda all read services through the registry.
+
+### Leases (no double-running)
+
+`IncidentStorage.acquire_lease(name, owner, ttl, now)` /
+`release_lease(name, owner)` give an exclusive, expiring lease:
+
+- JSON: entry `__lease__:<name>` in `incidents_state.json`, updated under an
+  exclusive lock file (cross-process) and a thread lock.
+- DynamoDB: item `service = "__lease__:<name>"` in the state table, written
+  with `attribute_not_exists OR owner = me OR lease_expires_at < now`.
+
+`cloudpulse serve` (background scheduler) and `cloudpulse run --loop` both
+take the `scheduler` lease before each round. Lambda does not use it; it
+relies on the per-service minimum-interval guard and versioned state, which
+also protect against any stray extra run.
+
 ## 6. Notifications
 
 `Notifier.send(NotificationEvent)`. Implementations: `LoggingNotifier`,
@@ -164,11 +193,28 @@ Status: **implemented and tested with moto; not deployed.**
 ## 8. Dashboard and API
 
 The dashboard calls `/api/*` on the same origin (Vite proxy in development,
-`cloudpulse serve --static` in production-like local use). The API is
-read-only, validates every parameter, returns `400/404/405/503/500` with
-generic messages, and redacts URLs. Monitored services come only from
-configuration; there is no registration endpoint. Demo mode is opt-in and
-labelled. No hosted deployment exists.
+`cloudpulse serve --static` otherwise).
+
+Read routes: `GET /api/health` (capabilities: `can_write`, `can_check`,
+`auth_required`, scheduler status, limits, form defaults), `/api/overview`,
+`/api/services`, `/api/services/{name}`, `/api/services/{name}/checks`,
+`/api/incidents`, `/api/incidents/{id}`.
+
+Write routes: `POST /api/services`, `PUT /api/services/{name}`,
+`DELETE /api/services/{name}`, `POST /api/services/{name}/check`,
+`POST /api/checks`. Errors use `{"error", "message", "field"?}` with
+`400` (validation, includes the offending `field`), `401` (token required),
+`403` (not allowed / cross-site), `404`, `405`, `409` (services-file entry is
+read-only), `411`/`413`/`415` (body), `421` (bad `Host`), `429` (rate limit,
+`Retry-After`), `503` (storage/checks unavailable).
+
+Permission is decided by the HTTP layer (`api_server.py`): without an admin
+token only loopback clients of a loopback-bound server may write; with
+`CLOUDPULSE_ADMIN_TOKEN` every write needs `Authorization: Bearer <token>`
+(constant-time comparison); `--allow-remote` requires the token. Writes also
+require a same-origin/allowed `Origin`, JSON bodies ≤ 16 KiB and pass per-client
+rate limits. Demo mode is opt-in, labelled and read-only. No hosted deployment
+exists.
 
 ## 9. Security design
 

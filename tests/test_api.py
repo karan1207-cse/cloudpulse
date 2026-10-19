@@ -201,8 +201,12 @@ def test_repeated_parameter_rejected(populated):
     assert code == 400
 
 
-def test_non_get_rejected(populated):
-    assert populated.handle("POST", "/api/services", {})[0] == 405
+def test_unsupported_methods_rejected(populated):
+    # POST /api/services is now a (permission-checked) write route; methods a
+    # route does not support still get 405.
+    assert populated.handle("POST", "/api/health", {})[0] == 405
+    assert populated.handle("PATCH", "/api/services", {})[0] == 405
+    assert populated.handle("POST", "/api/services", {})[0] == 403
 
 
 def test_storage_errors_become_503_without_details(clock):

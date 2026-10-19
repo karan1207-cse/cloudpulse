@@ -12,10 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from cloudpulse.errors import ConfigError, UnsafeURLError
+from cloudpulse.errors import ConfigError, ServiceValidationError, UnsafeURLError
 from cloudpulse.health_check import validate_accepted_status
 from cloudpulse.incident_manager import SEVERITIES
-from cloudpulse.url_safety import UrlPolicy
+from cloudpulse.url_safety import BlockedDestinationError, UrlPolicy
 
 MAX_SERVICES = 50
 MAX_SERVICE_TIMEOUT = 30.0
@@ -34,6 +34,10 @@ _SERVICE_KEYS = {
     "escalation_threshold",
     "enabled",
 }
+PRIVATE_TARGET_HINT = (
+    "For security, CloudPulse only monitors public internet addresses "
+    "(not localhost, private networks or cloud metadata endpoints)."
+)
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off", ""}
 
@@ -50,6 +54,19 @@ class ServiceConfig:
     accepted_status: tuple[int, int] = (200, 399)
     escalation_threshold: int | None = None
     enabled: bool = True
+
+    def to_storage_dict(self) -> dict[str, Any]:
+        """Full definition (including the unredacted URL) for persistence."""
+        return {
+            "name": self.name,
+            "url": self.url,
+            "timeout_seconds": self.timeout_seconds,
+            "failure_threshold": self.failure_threshold,
+            "severity": self.severity,
+            "accepted_status": list(self.accepted_status),
+            "escalation_threshold": self.escalation_threshold,
+            "enabled": self.enabled,
+        }
 
     def to_public_dict(self) -> dict[str, Any]:
         from cloudpulse.url_safety import redact_url
@@ -89,6 +106,10 @@ class AppConfig:
     cors_origins: tuple[str, ...] = field(
         default=("http://localhost:5173", "http://127.0.0.1:5173")
     )
+    services_table: str | None = None
+    check_interval_seconds: float = 60.0
+    # Never printed or logged (repr=False); compared in constant time.
+    admin_token: str | None = field(default=None, repr=False)
 
     @property
     def url_policy(self) -> UrlPolicy:
@@ -155,31 +176,46 @@ def _optional(env: Mapping[str, str], key: str) -> str | None:
 def parse_service(
     raw: Any,
     *,
-    index: int,
+    index: int | None,
     default_timeout: float,
     default_threshold: int,
     policy: UrlPolicy,
 ) -> ServiceConfig:
-    where = f"services[{index}]"
+    """Validate one service definition.
+
+    Raises :class:`ServiceValidationError` whose ``field`` and ``detail`` are
+    suitable for showing next to a form input.
+    """
+    where = f"services[{index}]" if index is not None else None
+
+    def fail(field: str | None, detail: str) -> ServiceValidationError:
+        return ServiceValidationError(field, detail, where)
+
     if not isinstance(raw, dict):
-        raise ConfigError(f"{where} must be an object.")
+        raise fail(None, "Each service must be an object.")
     unknown = set(raw) - _SERVICE_KEYS
     if unknown:
-        raise ConfigError(f"{where} has unknown keys: {', '.join(sorted(unknown))}.")
+        raise fail(None, f"Service has unknown keys: {', '.join(sorted(unknown))}.")
 
-    url = raw.get("url")
-    try:
-        policy.check_url(url)
-    except UnsafeURLError as exc:
-        raise ConfigError(f"{where}.url: {exc}") from exc
-
-    if "name" not in raw:
-        raise ConfigError(f"{where}.name is required.")
+    if "name" not in raw or raw["name"] in (None, ""):
+        raise fail("name", "A name is required.")
     name = raw["name"]
     if not isinstance(name, str) or not NAME_PATTERN.match(name):
-        raise ConfigError(
-            f"{where}.name must be 1-64 characters: letters, digits, '.', '_' or '-'."
+        raise fail(
+            "name",
+            "The name must be 1-64 characters: letters, digits, '.', '_' or '-', "
+            "starting with a letter or digit.",
         )
+
+    url = raw.get("url")
+    if url in (None, ""):
+        raise fail("url", "A URL is required, e.g. https://example.com/health.")
+    try:
+        policy.check_url(url)
+    except BlockedDestinationError as exc:
+        raise fail("url", f"{exc} {PRIVATE_TARGET_HINT}") from exc
+    except UnsafeURLError as exc:
+        raise fail("url", str(exc)) from exc
 
     timeout = raw.get("timeout_seconds", default_timeout)
     if (
@@ -187,8 +223,9 @@ def parse_service(
         or not isinstance(timeout, int | float)
         or not (0 < timeout <= MAX_SERVICE_TIMEOUT)
     ):
-        raise ConfigError(
-            f"{where}.timeout_seconds must be > 0 and <= {MAX_SERVICE_TIMEOUT}."
+        raise fail(
+            "timeout_seconds",
+            f"Timeout must be more than 0 and at most {MAX_SERVICE_TIMEOUT:g} seconds.",
         )
 
     threshold = raw.get("failure_threshold", default_threshold)
@@ -197,11 +234,14 @@ def parse_service(
         or not isinstance(threshold, int)
         or not (1 <= threshold <= MAX_THRESHOLD)
     ):
-        raise ConfigError(f"{where}.failure_threshold must be 1..{MAX_THRESHOLD}.")
+        raise fail(
+            "failure_threshold",
+            f"Failure threshold must be a whole number from 1 to {MAX_THRESHOLD}.",
+        )
 
     severity = raw.get("severity", "HIGH")
     if severity not in SEVERITIES:
-        raise ConfigError(f"{where}.severity must be one of {', '.join(SEVERITIES)}.")
+        raise fail("severity", f"Severity must be one of {', '.join(SEVERITIES)}.")
 
     accepted = raw.get("accepted_status", [200, 399])
     try:
@@ -211,7 +251,11 @@ def parse_service(
             raise ValueError("values must be integers")
         accepted_range = validate_accepted_status((accepted[0], accepted[1]))
     except ValueError as exc:
-        raise ConfigError(f"{where}.accepted_status {exc}.") from exc
+        raise fail(
+            "accepted_status",
+            f"accepted_status {exc}. Use two HTTP codes between 100 and 599, "
+            "lowest first (e.g. 200 and 399).",
+        ) from exc
 
     escalation = raw.get("escalation_threshold")
     if escalation is not None and (
@@ -219,14 +263,15 @@ def parse_service(
         or not isinstance(escalation, int)
         or not threshold < escalation <= MAX_THRESHOLD * 10
     ):
-        raise ConfigError(
-            f"{where}.escalation_threshold must be an integer greater than "
-            "failure_threshold."
+        raise fail(
+            "escalation_threshold",
+            "escalation_threshold must be a whole number greater than the "
+            "failure threshold.",
         )
 
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
-        raise ConfigError(f"{where}.enabled must be true or false.")
+        raise fail("enabled", "enabled must be true or false.")
 
     return ServiceConfig(
         name=name,
@@ -274,6 +319,22 @@ def load_services_file(path: Path, **kwargs: Any) -> tuple[ServiceConfig, ...]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigError(f"Services file {path} is not valid JSON: {exc}") from exc
     return parse_services(data, **kwargs)
+
+
+MIN_ADMIN_TOKEN_LENGTH = 32
+
+
+def _admin_token(env: Mapping[str, str]) -> str | None:
+    token = env.get("CLOUDPULSE_ADMIN_TOKEN")
+    if token is None or token == "":
+        return None
+    if len(token) < MIN_ADMIN_TOKEN_LENGTH or any(c.isspace() for c in token):
+        raise ConfigError(
+            f"CLOUDPULSE_ADMIN_TOKEN must be at least {MIN_ADMIN_TOKEN_LENGTH} "
+            "characters without spaces. Generate one with: "
+            'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+        )
+    return token
 
 
 def load_config(
@@ -402,6 +463,15 @@ def load_config(
             env, "CLOUDPULSE_API_PORT", 8000, minimum=1, maximum=65535, integer=True
         ),
         cors_origins=cors,
+        services_table=_optional(env, "CLOUDPULSE_SERVICES_TABLE"),
+        check_interval_seconds=_number(
+            env,
+            "CLOUDPULSE_CHECK_INTERVAL_SECONDS",
+            60.0,
+            minimum=10,
+            maximum=86_400,
+        ),
+        admin_token=_admin_token(env),
     )
 
     if config.backend == "aws":

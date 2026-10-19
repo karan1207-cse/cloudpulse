@@ -8,6 +8,8 @@ import {
   SeverityBadge,
   Timestamp,
 } from "../components/common";
+import { FirstRunCallToAction, SchedulerLine } from "../components/FirstRun";
+import { AddServiceLink, CheckAllButton } from "../components/ServiceActions";
 import { formatDuration, formatMs } from "../format";
 import { useAsync } from "../hooks";
 
@@ -20,12 +22,7 @@ export function OverviewPage() {
   const { totals, open_incidents, recent_recoveries, recent_checks, generated_at } = state.data;
 
   if (totals.services === 0) {
-    return (
-      <EmptyState>
-        No services are configured. Add services to your services file and run{" "}
-        <code>cloudpulse run</code>.
-      </EmptyState>
-    );
+    return <FirstRunCallToAction />;
   }
 
   const stats = [
@@ -38,12 +35,17 @@ export function OverviewPage() {
 
   return (
     <>
+      <div className="toolbar">
+        <AddServiceLink primary={false} />
+        <CheckAllButton onDone={reload} />
+      </div>
       <p className="muted">
         Data as of <Timestamp value={generated_at} />{" "}
         <button type="button" className="link" onClick={reload}>
           Refresh
         </button>
       </p>
+      <SchedulerLine />
       <dl className="stats">
         {stats.map((s) => (
           <div key={s.label} className={`stat ${s.tone}`}>

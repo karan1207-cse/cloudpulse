@@ -23,8 +23,30 @@ Terraform.
 > save it as `docs/images/dashboard-overview.png` and replace this note with
 > `![CloudPulse dashboard](docs/images/dashboard-overview.png)`.
 
+## Quick start: monitor a URL in 3 steps
+
+No configuration files needed. In Windows PowerShell, from the project folder:
+
+```powershell
+# 1. One-time setup
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt -e .
+npm --prefix dashboard ci
+npm --prefix dashboard run build
+
+# 2. Start CloudPulse (dashboard + automatic checks every 60 s)
+.\.venv\Scripts\python.exe -m cloudpulse serve --static dashboard/dist
+```
+
+3. Open **http://127.0.0.1:8000**, click **+ Add a URL**, type a name and a
+   web address (for example `example.com`) and press **Add service**.
+   CloudPulse runs a first check immediately, then keeps checking it in the
+   background while `serve` is running. Use **Check now** / **Check all now**
+   at any time, and **Edit** / **Delete** to change your list.
+
 ## Contents
 
+- [Quick start](#quick-start-monitor-a-url-in-3-steps)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Technology stack](#technology-stack)
@@ -64,9 +86,19 @@ Terraform.
   DynamoDB (Query-based, GSIs, TTL, pagination).
 - **CLI** for one-off checks, scheduled runs, status, incidents, history,
   serving the dashboard API, and config validation, with meaningful exit codes.
-- **Read-only JSON API** + **React/TypeScript dashboard** (overview, services,
+- **Manage services from the dashboard**: add, edit and delete URLs with a
+  simple form (advanced settings collapsed), inline validation and friendly
+  errors; **Check now** per service and **Check all now**.
+- **Automatic background checks** inside `cloudpulse serve` (default every 60
+  seconds), protected against double-running with `cloudpulse run --loop` by
+  a shared lease.
+- **One service list everywhere**: services added in the dashboard are stored
+  through the storage abstraction (JSON locally, DynamoDB in AWS), so the CLI,
+  the API and Lambda all see them. A services file is still supported.
+- **JSON API** + **React/TypeScript dashboard** (overview, services,
   incidents with filters/sorting/pagination, service detail with response-time
-  trend and recovery timeline). A clearly labelled demo mode is opt-in.
+  trend and recovery timeline). Write endpoints are local-only by default or
+  require an admin token. A clearly labelled demo mode is opt-in.
 - **SSRF protection**: loopback, private, link-local and metadata addresses
   are blocked after DNS resolution, on the connected socket, and after every
   redirect.
@@ -129,9 +161,12 @@ src/cloudpulse/
   dynamodb_storage.py, dynamodb_incident_storage.py  DynamoDB adapters
   notifications.py        Notifier protocol, logging/SNS/composite notifiers
   config.py               Env + services-file configuration and validation
+  service_store.py        Dashboard-managed services (memory, JSON, DynamoDB)
+  service_registry.py     Merged service list (services file + store), validation
+  scheduler.py            Check-now runner and the background scheduler (lease)
   factory.py              Wiring of backends
   aws_lambda.py           Lambda entry point
-  api.py, api_server.py   Read-only dashboard API and local server
+  api.py, api_server.py   Dashboard API (reads + protected writes) and server
   observability.py        JSON logs and CloudWatch EMF metrics
   cli.py                  Command-line interface
 tests/                    pytest suite (unit, integration, mocked AWS)
@@ -162,16 +197,24 @@ If script execution is blocked, run
 
 ## Configuration
 
-Configuration comes from environment variables; services come from a JSON
-file (`CLOUDPULSE_SERVICES_FILE`) or inline JSON (`CLOUDPULSE_SERVICES`).
-See [.env.example](.env.example) (placeholders only) and
-[services.example.json](services.example.json). CloudPulse does not read
-`.env` files itself — set variables in your shell:
+Everything has a sensible default, so no configuration is needed to start.
+Settings come from environment variables — see [.env.example](.env.example)
+(placeholders only). CloudPulse does not read `.env` files itself; set
+variables in your shell, e.g. `$env:CLOUDPULSE_CHECK_INTERVAL_SECONDS = "30"`.
 
-```powershell
-$env:CLOUDPULSE_SERVICES_FILE = "services.example.json"
-cloudpulse config show
-```
+### Where the list of services comes from
+
+1. **The dashboard (recommended)** — services you add there are saved in
+   `data/services.json` (local) or the DynamoDB services table (AWS). The
+   CLI can manage the same list:
+   `cloudpulse services add NAME URL`, `cloudpulse services list`,
+   `cloudpulse services remove NAME`.
+2. **A services file (optional, for automation)** — `CLOUDPULSE_SERVICES_FILE`
+   (see [services.example.json](services.example.json)) or inline
+   `CLOUDPULSE_SERVICES`. These services are shown in the dashboard as
+   *read-only (services file)*. Run `cloudpulse services import` to copy them
+   into the store so they can be edited in the dashboard (then remove the
+   file setting).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -184,11 +227,14 @@ cloudpulse config show
 | `CLOUDPULSE_MAX_REDIRECTS` | `5` | redirects followed (each re-validated) |
 | `CLOUDPULSE_ALLOW_PRIVATE_TARGETS` | `false` | local testing only |
 | `CLOUDPULSE_MIN_CHECK_INTERVAL_SECONDS` | `0` | skip duplicate checks |
+| `CLOUDPULSE_CHECK_INTERVAL_SECONDS` | `60` | background checks in `serve` (min 10) |
+| `CLOUDPULSE_ADMIN_TOKEN` | — | ≥ 32 chars; required for changes when set, and for `--allow-remote` |
 | `CLOUDPULSE_LOG_LEVEL` | `INFO` | `DEBUG`…`ERROR` |
 | `CLOUDPULSE_API_HOST` / `_PORT` | `127.0.0.1` / `8000` | local API |
 | `CLOUDPULSE_CORS_ORIGINS` | Vite dev origins | explicit origins, no `*` |
 | `AWS_REGION` | — | AWS backend region |
 | `CLOUDPULSE_HEALTH_TABLE`, `_INCIDENTS_TABLE`, `_STATE_TABLE` | — | required for `aws` |
+| `CLOUDPULSE_SERVICES_TABLE` | — | DynamoDB table for dashboard-managed services (aws) |
 | `CLOUDPULSE_SNS_TOPIC_ARN` | — | SNS alerts (aws backend only) |
 | `CLOUDPULSE_HISTORY_RETENTION_DAYS` | `30` | DynamoDB TTL for history |
 
@@ -200,14 +246,19 @@ services.
 ## CLI
 
 ```powershell
+cloudpulse serve --static dashboard/dist         # dashboard + automatic checks
+cloudpulse serve --check-interval 30 --scheduler on
+cloudpulse services add my-shop https://shop.example.com/ --threshold 2
+cloudpulse services list
+cloudpulse services remove my-shop
+cloudpulse services import                        # copy services-file entries into the store
 cloudpulse check https://example.com/            # one check, nothing stored
-cloudpulse run                                    # check all configured services once
-cloudpulse run --loop --interval 60               # keep checking
+cloudpulse run                                    # check all services once
+cloudpulse run --loop --interval 60               # keep checking (not while serve is checking)
 cloudpulse run --service example-site --json
 cloudpulse status                                 # current state per service
 cloudpulse incidents --status OPEN --severity HIGH
 cloudpulse history --service example-site --limit 20
-cloudpulse serve                                  # API on http://127.0.0.1:8000/api
 cloudpulse config validate
 cloudpulse https://example.com --threshold 3 --interval 10   # legacy continuous monitor
 ```
@@ -222,6 +273,11 @@ configuration error · `3` storage error or a service could not be processed ·
 To test against a local endpoint (e.g. `http://127.0.0.1:8080`) pass
 `--allow-private` (refused when `CLOUDPULSE_ENV=production`).
 
+`serve --scheduler auto` (default) runs background checks for the `local` and
+`memory` backends and not for `aws`, where the scheduled Lambda checks. Only
+one scheduler checks at a time: `serve` and `run --loop` share a lease, and a
+second one waits (`run --loop` exits with a clear message).
+
 ## Running the tests
 
 ```powershell
@@ -231,42 +287,65 @@ To test against a local endpoint (e.g. `http://127.0.0.1:8080`) pass
 .\.venv\Scripts\python.exe -m pytest --cov
 ```
 
-Results on the development machine (Windows 11, Python 3.14.0): **357
-passed**, branch coverage **94 %**. Dashboard: **18 passed**. Tests never
+Results on the development machine (Windows 11, Python 3.14.0): **461
+passed**, branch coverage **93 %**. Dashboard: **56 passed**. Tests never
 contact AWS (moto mocks) and only use the network against servers they
 start on `127.0.0.1`. See [docs/TESTING.md](docs/TESTING.md).
 
 ## Dashboard
 
-```powershell
-# terminal 1: API over your local data
-cloudpulse serve
-# terminal 2: dashboard dev server (proxies /api to 127.0.0.1:8000)
-cd dashboard
-npm ci
-npm run dev        # http://127.0.0.1:5173
-```
-
-Or build once and serve both from one process:
+Build once and serve the dashboard, API and background checks from one
+process (see [Quick start](#quick-start-monitor-a-url-in-3-steps)):
 
 ```powershell
-cd dashboard; npm ci; npm run build; cd ..
+npm --prefix dashboard ci
+npm --prefix dashboard run build
 cloudpulse serve --static dashboard/dist          # http://127.0.0.1:8000
 ```
 
-Pages: **Overview** (totals, open incidents, recent recoveries, recent
-checks), **Services**, **Incidents** (status/severity filters, sortable
-columns, pagination), **Service detail** (check history, response-time trend,
-incident history and recovery timeline). Loading, empty and error states are
-handled; all times are shown in UTC.
+For frontend development, run `cloudpulse serve` in one terminal and
+`npm --prefix dashboard run dev` (http://127.0.0.1:5173, proxies `/api`) in
+another.
+
+Pages:
+
+- **Overview** — totals, open incidents, recent recoveries, recent checks,
+  automatic-check status, **Check all now**. With no services it shows an
+  *Add your first URL to monitor* call to action.
+- **Add / Edit service** — name and URL, plus a collapsed *Advanced settings*
+  section (timeout, failures before an incident, severity, healthy status
+  codes, enabled). Instant validation with friendly messages (bad URL,
+  duplicate name, private/local address, 50-service limit); the server
+  re-validates everything. A success notification confirms the result of the
+  first check.
+- **Services** — status, last check, response time, failures and current
+  incident, with **Check now**, **Edit** and **Delete** (with confirmation).
+- **Incidents** — status/severity filters, sortable columns, pagination.
+- **Service detail** — actions, check history, response-time trend, incident
+  history and recovery timeline.
+
+Loading, empty and error states are handled; the layout works on phones;
+all times are shown in UTC.
 
 **Demo mode** (`http://127.0.0.1:5173/?demo=1` or `VITE_DEMO_MODE=true`)
 uses fabricated sample data and shows a permanent banner saying so. It is
 never enabled implicitly.
 
 The browser only talks to the CloudPulse API; it never holds AWS credentials.
-To view AWS data, run `cloudpulse serve --backend aws` locally with your own
-credentials. No hosted API or dashboard is deployed.
+To view and manage AWS data, run `cloudpulse serve --backend aws` locally with
+your own credentials (set `CLOUDPULSE_SERVICES_TABLE` to manage services; the
+Lambda picks them up on its next run). No hosted API or dashboard is deployed.
+
+### Who can make changes
+
+| Server setup | Reading | Adding/editing/deleting/checking |
+| --- | --- | --- |
+| Default (`127.0.0.1`, no token) | anyone who can reach localhost | only requests from this computer |
+| `CLOUDPULSE_ADMIN_TOKEN` set | as above | only with `Authorization: Bearer <token>` (the dashboard asks for it and keeps it for the browser tab only) |
+| `--allow-remote` | network clients | refused to start unless `CLOUDPULSE_ADMIN_TOKEN` is set |
+
+Generate a token with
+`python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
 ## AWS architecture
 
@@ -288,9 +367,12 @@ credentials. No hosted API or dashboard is deployed.
   `IncidentsRecovered`, `NotificationFailures`, `ServiceErrors`,
   `ServicesSkipped`; alarms for Lambda errors, duration, heartbeat, service
   errors and notification failures.
-- **IAM**: the Lambda role can only write its own logs, use the three tables
-  (specific actions) and publish to the one topic; it also carries a
-  permissions boundary.
+- **DynamoDB services table** (`…-services`, PK `name`) holds services added
+  from the dashboard; the Lambda reads it (one-page `Scan`, ≤ 50 items) on
+  every run in addition to `services_json`.
+- **IAM**: the Lambda role can only write its own logs, use the monitoring
+  tables (specific actions), read the services table and publish to the one
+  topic; it also carries a permissions boundary.
 
 Changing the schedule: set `schedule_expression` (e.g. `"rate(1 minute)"` or
 `"cron(0/10 * * * ? *)"`) and keep `min_check_interval_seconds` below the
@@ -342,9 +424,16 @@ Implemented:
   redacted (no user-info, query or fragment) in notifications, the API and
   stored history. Error messages for unexpected exceptions contain only the
   exception type.
-- Read-only API, no target registration endpoint, strict query validation,
-  explicit CORS allow-list, security headers, binds to `127.0.0.1` and refuses
-  other addresses unless `--allow-remote` is given.
+- Service registration is protected: write endpoints are local-only by
+  default (loopback client of a loopback-bound server) or require the admin
+  token (constant-time comparison); `--allow-remote` requires a token.
+  Cross-site writes are blocked (JSON content type, `Origin` check) and DNS
+  rebinding is blocked (`Host` must be localhost). Request bodies are capped at
+  16 KiB, writes are rate limited (60/min) and checks too (20/min) per client,
+  and at most 50 services exist. Every URL is SSRF-checked when saved
+  (including DNS resolution) and again on every check and redirect.
+- Strict query and body validation, explicit CORS allow-list, security
+  headers, binds to `127.0.0.1` by default.
 - Least-privilege IAM with resource-scoped ARNs and a permissions boundary;
   the optional GitHub deploy role uses OIDC, is restricted to one repository
   and environment, and can only create roles carrying the boundary.
@@ -355,13 +444,14 @@ Implemented:
 
 Known limitations:
 
-- The API has **no authentication**. It is meant for local use; do not expose
-  it publicly. Putting it behind real auth (e.g. an authenticating proxy) is
-  future work.
+- Reads (service names, redacted URLs, incidents) are not authenticated.
+  Keep the server on `127.0.0.1`, or put `--allow-remote` behind your own
+  access controls/TLS. There is a single admin token, not user accounts.
 - The timeout is a socket timeout per operation plus a budget across
   redirects; a server that drips headers slowly can exceed it. The Lambda time
   budget still bounds each run.
-- JSON storage is for a single local process (atomic writes, no file locks).
+- JSON storage is meant for one machine: writes are atomic, leases use a
+  lock file, and Windows sharing violations are retried briefly.
 - On Windows, connecting to a closed local port can surface as `TIMEOUT`
   rather than `CONNECTION_ERROR` because Windows retries refused connections.
 - GitHub Actions are pinned to major version tags, not commit SHAs.
@@ -372,7 +462,11 @@ Known limitations:
 | --- | --- |
 | `ModuleNotFoundError: cloudpulse` | `pip install -e .` or run pytest from the repo root (pytest is configured with `pythonpath = src`) |
 | `configuration error: … blocked (non-public) address` | Target is loopback/private. For local testing use `--allow-private`; never in production |
-| `No services configured` | Set `CLOUDPULSE_SERVICES_FILE` or pass `--services-file` |
+| `No services configured yet` | Add one in the dashboard, with `cloudpulse services add NAME URL`, or set `CLOUDPULSE_SERVICES_FILE` |
+| "…resolves to a blocked address" when adding | The address is on a private/local network; CloudPulse only monitors public addresses |
+| No **+ Add service** button | The browser is not on the computer running CloudPulse, or the server is read-only (aws backend without `CLOUDPULSE_SERVICES_TABLE`) |
+| `Another CloudPulse scheduler is already checking` | `cloudpulse serve` is already checking automatically; stop it or don't use `run --loop` |
+| Dashboard asks for an admin token | The server has `CLOUDPULSE_ADMIN_TOKEN` set; ask whoever runs it |
 | `storage error: … is not valid JSON` | The data file is corrupt. CloudPulse will not overwrite it — fix or move it |
 | Dashboard shows "Cannot reach the CloudPulse API" | Start `cloudpulse serve` (port 8000) before `npm run dev` |
 | `The aws backend requires: …` | Set the three `CLOUDPULSE_*_TABLE` variables (Terraform outputs them) |
