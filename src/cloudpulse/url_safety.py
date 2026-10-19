@@ -140,6 +140,12 @@ class UrlPolicy:
         """Validate syntax and, unless allowed, IP-literal hosts."""
         parsed = validate_url(url)
         if not self.allow_private:
+            host = (parsed.hostname or "").rstrip(".").lower()
+            if host == "localhost" or host.endswith(".localhost"):
+                # RFC 6761: always loopback; block without a DNS lookup.
+                raise BlockedDestinationError(
+                    f"Destination {host} is a blocked (loopback) address."
+                )
             literal = _parse_ip(parsed.hostname or "")
             if literal is not None and is_blocked_address(literal):
                 raise BlockedDestinationError(

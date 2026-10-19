@@ -58,6 +58,33 @@ export interface ServiceSummary {
   source?: "config" | "dashboard";
   editable?: boolean;
   escalation_threshold?: number | null;
+  check_mode?: CheckMode;
+  backend_timeout_seconds?: number;
+}
+
+export type CheckMode = "quick" | "full";
+export type ComponentKind = "page" | "asset" | "backend";
+export type ComponentStatus = "up" | "down" | "skipped" | "blocked" | "disabled" | "pending";
+
+export interface SiteComponent {
+  url: string;
+  kind: ComponentKind;
+  /** main = the service URL; html = found in the page; discovered = found in JS; manual = added by you */
+  source: "main" | "html" | "discovered" | "manual";
+  role?: "main";
+  status: ComponentStatus;
+  status_code: number | null;
+  response_time_ms: number | null;
+  error: string | null;
+  error_type: string | null;
+}
+
+export interface SiteView {
+  check_mode: CheckMode;
+  discovered_at: string | null;
+  last_checked_at: string | null;
+  components: SiteComponent[];
+  limits: { max_manual: number; max_backends: number; max_pages: number };
 }
 
 /** What the form sends to POST/PUT /api/services. */
@@ -69,6 +96,8 @@ export interface ServiceInput {
   severity: Severity;
   accepted_status: [number, number];
   enabled: boolean;
+  check_mode: CheckMode;
+  backend_timeout_seconds: number;
 }
 
 export interface SaveResult {
@@ -85,6 +114,8 @@ export interface CheckOutcome {
   status_code: number | null;
   response_time_ms: number | null;
   error_type: string | null;
+  error?: string | null;
+  check_mode?: CheckMode | null;
 }
 
 export interface CheckResult {
@@ -144,6 +175,7 @@ export interface ServiceDetail {
   service: ServiceSummary;
   checks: HealthCheck[];
   incidents: Incident[];
+  site?: SiteView;
 }
 
 export interface IncidentPage {

@@ -109,3 +109,11 @@ class IncidentStorage(Protocol):
     def release_lease(self, name: str, owner: str) -> None:
         """Release the lease if ``owner`` holds it."""
         ...
+
+    def get_site_profile(self, service: str) -> dict[str, Any] | None:
+        """Full-site-check discovery cache and user overrides for a service."""
+        ...
+
+    def save_site_profile(self, service: str, profile: dict[str, Any]) -> None:
+        """Persist the site profile (last write wins)."""
+        ...

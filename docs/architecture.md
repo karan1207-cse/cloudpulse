@@ -22,6 +22,7 @@ dependencies; AWS services are adapters around it.
 | Notifications | `notifications.py` | Message formatting; logging, SNS, composite notifiers |
 | Configuration | `config.py`, `factory.py` | Env/services-file validation; backend wiring |
 | Service list | `service_store.py`, `service_registry.py` | Dashboard-managed services (memory/JSON/DynamoDB) merged with services-file entries; field-level validation and SSRF pre-check |
+| Full-site checks | `site_check.py` | HTML/JS discovery of assets, pages and backend origins; bounded, SSRF-guarded GET probes; per-component results; cached site profile with user overrides |
 | Scheduling | `scheduler.py` | "Check now" runner (one run at a time per process) and the background scheduler of `serve`, guarded by a storage lease |
 | Entry points | `cli.py`, `aws_lambda.py`, `api_server.py` | CLI, Lambda handler, local HTTP server |
 | API | `api.py` | Read-only JSON views for the dashboard |
@@ -142,6 +143,25 @@ read and upgraded. Single-process use.
 read-only through the API) with *dashboard* services from the store; a name
 defined in both uses the config entry. The CLI, the API, the background
 scheduler and the Lambda all read services through the registry.
+
+### Site profiles (full-site checks)
+
+Per service, `get_site_profile` / `save_site_profile` keep: discovered
+backend origins, discovery time and bundle fingerprint (rediscover after 6 h,
+on a new bundle set, or on "Check now"), the user's manual components and
+turned-off URLs, and the last component snapshot shown under *What we check*.
+Stored as `__site__:<name>` in the JSON state file or as a state-table item
+in DynamoDB. History records only keep `component_counts` and up to five
+`failed_components`, so history stays small.
+
+Full check flow: main page (body ≤ 2 MB) → parse HTML (`<script src>`,
+stylesheets, `modulepreload`, `preconnect`, `<a href>`, inline scripts) →
+probe own assets (re-read every check, so new hashed bundles never cause
+false alarms) and, when discovery is due, scan bundles (≤ 2 MB each, ≤ 5 MB
+total) → probe up to 10 pages → GET each backend origin root. Healthy only if
+the main page, assets, pages and every enabled backend are up. A discovered
+backend on a private/loopback address is never contacted and counts as down
+(`PRIVATE_BACKEND`): on a public site, visitors cannot reach it.
 
 ### Leases (no double-running)
 

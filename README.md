@@ -39,7 +39,9 @@ npm --prefix dashboard run build
 ```
 
 3. Open **http://127.0.0.1:8000**, click **+ Add a URL**, type a name and a
-   web address (for example `example.com`) and press **Add service**.
+   web address (for example `example.com`) and press **Add service**. For a
+   web app keep **Full site (recommended for web apps)** selected — it also
+   checks the app's files, pages and backend APIs.
    CloudPulse runs a first check immediately, then keeps checking it in the
    background while `serve` is running. Use **Check now** / **Check all now**
    at any time, and **Edit** / **Delete** to change your list.
@@ -89,6 +91,10 @@ npm --prefix dashboard run build
 - **Manage services from the dashboard**: add, edit and delete URLs with a
   simple form (advanced settings collapsed), inline validation and friendly
   errors; **Check now** per service and **Check all now**.
+- **Full-site checks** for web apps: from just the main URL, also checks
+  the page's own files, a few pages and the backend APIs its JavaScript calls
+  (discovered automatically), so a dead backend behind a working page is
+  reported — naming the failing component in plain words.
 - **Automatic background checks** inside `cloudpulse serve` (default every 60
   seconds), protected against double-running with `cloudpulse run --loop` by
   a shared lease.
@@ -102,6 +108,43 @@ npm --prefix dashboard run build
 - **SSRF protection**: loopback, private, link-local and metadata addresses
   are blocked after DNS resolution, on the connected socket, and after every
   redirect.
+
+### Quick vs. full-site checks
+
+| | Quick (this URL only) | Full site (recommended for web apps) |
+| --- | --- | --- |
+| Checks | the one address | the page, its own JS/CSS files, up to 10 same-site pages, up to 5 backend APIs found in its code |
+| Catches | the URL being down | missing files, broken pages, **a dead or misconfigured backend behind a page that still loads** |
+| Best for | APIs, `/health` endpoints | single-page apps on Firebase/Netlify/Vercel/S3 |
+
+Static hosting answers `200` for the page even when the API behind it is
+down, so a quick check of such a site says "Healthy" while the app is broken.
+A full-site check reads the page's HTML and JavaScript bundles to find the
+backend origins the app calls (e.g. `axios.create({baseURL: …})`,
+`fetch("https://…")`, `VITE_API_URL`, `<link rel=preconnect>`), filters
+third-party noise (fonts, CDNs, analytics, Google, docs links), and sends
+**one GET to each backend's root**. Any answer below 500 — even 404/401/405 —
+means the server is up; 5xx, timeouts, DNS/TLS/connection errors mean down.
+If the app's own code points its API at `localhost` or a private address,
+the backend is reported **down** ("visitors' browsers cannot reach it") — this
+is a common production build mistake. Discovery is cached and refreshed every
+6 hours, after a deploy changes the bundles, and on **Check now**; on the
+service page (**What we check**) you can turn off a noisy component or add one
+discovery missed.
+
+**What a full-site check cannot catch:** features behind a login, actions
+that fail while the server is up (e.g. a "Quick Add" whose AI provider
+errors — CloudPulse only sends GET requests and never submits forms), and
+backends whose address is only decided at runtime. For those, you can add a
+`/health` endpoint to your backend that tests its own dependencies and add it
+as a component (optional).
+
+Safety and limits: every discovered URL passes the SSRF guard (DNS
+resolution, connected peer, redirects); private/loopback/metadata targets are
+never contacted. Requests are sequential, GET-only, with a polite
+User-Agent, no cookies and no credentials. Caps per check: 10 pages, 30
+assets, 5 backends, 10 manual components, 5 MB downloaded (2 MB per bundle),
+90 seconds total. Backend timeout: 20 s by default (cold starts), 1–60 s.
 
 ### What "healthy" means
 
@@ -164,6 +207,7 @@ src/cloudpulse/
   service_store.py        Dashboard-managed services (memory, JSON, DynamoDB)
   service_registry.py     Merged service list (services file + store), validation
   scheduler.py            Check-now runner and the background scheduler (lease)
+  site_check.py           Full-site checks: discovery, probing, site profiles
   factory.py              Wiring of backends
   aws_lambda.py           Lambda entry point
   api.py, api_server.py   Dashboard API (reads + protected writes) and server
@@ -248,7 +292,8 @@ services.
 ```powershell
 cloudpulse serve --static dashboard/dist         # dashboard + automatic checks
 cloudpulse serve --check-interval 30 --scheduler on
-cloudpulse services add my-shop https://shop.example.com/ --threshold 2
+cloudpulse services add my-shop https://shop.example.com/ --threshold 2 --full
+cloudpulse check https://my-app.web.app/ --full   # one-off full-site check with a component table
 cloudpulse services list
 cloudpulse services remove my-shop
 cloudpulse services import                        # copy services-file entries into the store
@@ -287,8 +332,8 @@ second one waits (`run --loop` exits with a clear message).
 .\.venv\Scripts\python.exe -m pytest --cov
 ```
 
-Results on the development machine (Windows 11, Python 3.14.0): **461
-passed**, branch coverage **93 %**. Dashboard: **56 passed**. Tests never
+Results on the development machine (Windows 11, Python 3.14.0): **529
+passed**, branch coverage **92 %**. Dashboard: **67 passed**. Tests never
 contact AWS (moto mocks) and only use the network against servers they
 start on `127.0.0.1`. See [docs/TESTING.md](docs/TESTING.md).
 
@@ -312,17 +357,21 @@ Pages:
 - **Overview** — totals, open incidents, recent recoveries, recent checks,
   automatic-check status, **Check all now**. With no services it shows an
   *Add your first URL to monitor* call to action.
-- **Add / Edit service** — name and URL, plus a collapsed *Advanced settings*
+- **Add / Edit service** — name and URL, the check type (*Full site*, the
+  default for new services, or *Quick*), plus a collapsed *Advanced settings*
   section (timeout, failures before an incident, severity, healthy status
-  codes, enabled). Instant validation with friendly messages (bad URL,
+  codes, backend timeout, enabled). Instant validation with friendly messages (bad URL,
   duplicate name, private/local address, 50-service limit); the server
   re-validates everything. A success notification confirms the result of the
   first check.
 - **Services** — status, last check, response time, failures and current
   incident, with **Check now**, **Edit** and **Delete** (with confirmation).
 - **Incidents** — status/severity filters, sortable columns, pagination.
-- **Service detail** — actions, check history, response-time trend, incident
-  history and recovery timeline.
+- **Service detail** — actions, **What we check** (every component with
+  its status and a plain-language problem, turn off/on, add a missed
+  backend or page, and an honest list of what full checks cannot catch),
+  check history, response-time trend, incident history and recovery
+  timeline.
 
 Loading, empty and error states are handled; the layout works on phones;
 all times are shown in UTC.

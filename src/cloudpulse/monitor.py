@@ -80,6 +80,13 @@ class CheckOutcome:
                 self.result.get("response_time_ms") if self.result else None
             ),
             "error_type": self.result.get("error_type") if self.result else None,
+            "error": self.result.get("error") if self.result else None,
+            "check_mode": self.result.get("check_mode", "quick")
+            if self.result
+            else None,
+            "component_counts": (
+                self.result.get("component_counts") if self.result else None
+            ),
             "incident_id": self.incident.get("id") if self.incident else None,
             "notification_error": self.notification_error,
             "errors": list(self.errors),

@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type FormEvent } from "react";
 import { setAdminToken } from "../api/auth";
 import { ApiError } from "../api/errors";
-import type { Health, ServiceInput, ServiceSummary, Severity } from "../api/types";
+import type { CheckMode, Health, ServiceInput, ServiceSummary, Severity } from "../api/types";
 import { SEVERITIES } from "../api/types";
 
 export type FieldName =
@@ -10,7 +10,9 @@ export type FieldName =
   | "timeout_seconds"
   | "failure_threshold"
   | "severity"
-  | "accepted_status";
+  | "accepted_status"
+  | "check_mode"
+  | "backend_timeout_seconds";
 
 export interface FormValues {
   name: string;
@@ -21,6 +23,8 @@ export interface FormValues {
   accepted_low: string;
   accepted_high: string;
   enabled: boolean;
+  check_mode: CheckMode;
+  backend_timeout_seconds: string;
 }
 
 export type FieldErrors = Partial<Record<FieldName, string>>;
@@ -103,6 +107,15 @@ export function validateForm(values: FormValues): { errors: FieldErrors; input?:
   )
     errors.accepted_status = "Use two HTTP codes between 100 and 599, lowest first (e.g. 200 and 399).";
 
+  const backendTimeout = Number(values.backend_timeout_seconds);
+  if (
+    !values.backend_timeout_seconds.trim() ||
+    !Number.isFinite(backendTimeout) ||
+    backendTimeout < 1 ||
+    backendTimeout > 60
+  )
+    errors.backend_timeout_seconds = "Enter a backend timeout between 1 and 60 seconds.";
+
   if (Object.keys(errors).length > 0) return { errors };
   return {
     errors,
@@ -114,6 +127,8 @@ export function validateForm(values: FormValues): { errors: FieldErrors; input?:
       severity: values.severity,
       accepted_status: [low, high],
       enabled: values.enabled,
+      check_mode: values.check_mode,
+      backend_timeout_seconds: backendTimeout,
     },
   };
 }
@@ -134,6 +149,9 @@ export function initialValues(health: Health | null, service?: ServiceSummary): 
     accepted_low: String(service?.accepted_status[0] ?? defaults.accepted_status[0]),
     accepted_high: String(service?.accepted_status[1] ?? defaults.accepted_status[1]),
     enabled: service?.enabled ?? true,
+    // New services default to the full-site check; existing ones keep theirs.
+    check_mode: service ? (service.check_mode ?? "quick") : "full",
+    backend_timeout_seconds: String(service?.backend_timeout_seconds ?? 20),
   };
 }
 
@@ -160,10 +178,19 @@ export function ServiceForm({ health, service, onSubmit, onCancel }: Props) {
     setValues((v) => ({ ...v, [key]: value }));
 
   const focusFirstError = (fieldErrors: FieldErrors) => {
-    const order: FieldName[] = ["name", "url", "timeout_seconds", "failure_threshold", "severity", "accepted_status"];
+    const order: FieldName[] = [
+      "name",
+      "url",
+      "check_mode",
+      "timeout_seconds",
+      "failure_threshold",
+      "severity",
+      "accepted_status",
+      "backend_timeout_seconds",
+    ];
     const first = order.find((f) => fieldErrors[f]);
     if (!first) return;
-    if (first !== "name" && first !== "url") setAdvancedOpen(true);
+    if (first !== "name" && first !== "url" && first !== "check_mode") setAdvancedOpen(true);
     window.setTimeout(() => refs.current[first]?.focus(), 0);
   };
 
@@ -259,6 +286,50 @@ export function ServiceForm({ health, service, onSubmit, onCancel }: Props) {
         </p>
         {errorText("url")}
       </div>
+
+      <fieldset className="field check-mode" aria-describedby={`${id}-check_mode-hint`}>
+        <legend>What should we check?</legend>
+        <label className="choice">
+          <input
+            type="radio"
+            name={`${id}-check-mode`}
+            value="full"
+            checked={values.check_mode === "full"}
+            onChange={() => set("check_mode", "full")}
+            ref={(el) => {
+              if (values.check_mode === "full") refs.current.check_mode = el;
+            }}
+          />
+          <span>
+            <strong>Full site (recommended for web apps)</strong>
+            <span className="hint">
+              Also checks the page's own files, a few of its pages and the backend APIs its code talks
+              to — catches a dead backend behind a working page.
+            </span>
+          </span>
+        </label>
+        <label className="choice">
+          <input
+            type="radio"
+            name={`${id}-check-mode`}
+            value="quick"
+            checked={values.check_mode === "quick"}
+            onChange={() => set("check_mode", "quick")}
+            ref={(el) => {
+              if (values.check_mode === "quick") refs.current.check_mode = el;
+            }}
+          />
+          <span>
+            <strong>Quick (this URL only)</strong>
+            <span className="hint">Only checks that this one address answers. Best for APIs and /health URLs.</span>
+          </span>
+        </label>
+        <p className="hint" id={`${id}-check_mode-hint`}>
+          Full-site checks cannot log in or press buttons; for those, add a /health endpoint to your
+          backend (optional).
+        </p>
+        {errorText("check_mode")}
+      </fieldset>
 
       <details
         className="advanced"
@@ -361,6 +432,27 @@ export function ServiceForm({ health, service, onSubmit, onCancel }: Props) {
             <p className="hint" id={`${id}-accepted_status-hint`}>Default 200 to 399.</p>
             {errorText("accepted_status")}
           </fieldset>
+          <div className="field">
+            <label htmlFor={`${id}-backend-timeout`}>Backend timeout (seconds, full-site)</label>
+            <input
+              id={`${id}-backend-timeout`}
+              ref={(el) => {
+                refs.current.backend_timeout_seconds = el;
+              }}
+              type="number"
+              min="1"
+              max="60"
+              step="1"
+              value={values.backend_timeout_seconds}
+              onChange={(e) => set("backend_timeout_seconds", e.target.value)}
+              aria-invalid={errors.backend_timeout_seconds ? true : undefined}
+              aria-describedby={describe("backend_timeout_seconds", true)}
+            />
+            <p className="hint" id={`${id}-backend_timeout_seconds-hint`}>
+              Generous by default: free hosting can take a while to wake up.
+            </p>
+            {errorText("backend_timeout_seconds")}
+          </div>
           <div className="field checkbox">
             <input
               id={`${id}-enabled`}
@@ -406,4 +498,6 @@ const fieldLabels: Record<FieldName, true> = {
   failure_threshold: true,
   severity: true,
   accepted_status: true,
+  check_mode: true,
+  backend_timeout_seconds: true,
 };

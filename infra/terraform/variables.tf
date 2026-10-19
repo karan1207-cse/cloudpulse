@@ -94,9 +94,9 @@ variable "lambda_architecture" {
 }
 
 variable "lambda_timeout_seconds" {
-  description = "Lambda timeout. Services that cannot finish in the remaining time are skipped and reported."
+  description = "Lambda timeout. Services that cannot finish in the remaining time are skipped and reported. Full-site checks can take up to 90 seconds each."
   type        = number
-  default     = 60
+  default     = 180
 
   validation {
     condition     = var.lambda_timeout_seconds >= 10 && var.lambda_timeout_seconds <= 900

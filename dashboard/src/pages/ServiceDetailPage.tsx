@@ -11,6 +11,7 @@ import {
 } from "../components/common";
 import { ResponseTimeChart } from "../components/ResponseTimeChart";
 import { ServiceActions } from "../components/ServiceActions";
+import { SiteComponents } from "../components/SiteComponents";
 import { formatDuration, formatMs } from "../format";
 import { useAsync } from "../hooks";
 
@@ -20,7 +21,7 @@ export function ServiceDetailPage({ name }: { name: string }) {
 
   if (state.status === "loading") return <Loading label={`Loading ${name}…`} />;
   if (state.status === "error") return <ErrorState error={state.error} onRetry={reload} />;
-  const { service, checks, incidents } = state.data;
+  const { service, checks, incidents, site } = state.data;
   const timeline = [...incidents].sort((a, b) => b.created_at.localeCompare(a.created_at));
 
   return (
@@ -41,11 +42,14 @@ export function ServiceDetailPage({ name }: { name: string }) {
         <div><dt>Consecutive failures</dt><dd>{service.consecutive_failures} (threshold {service.failure_threshold})</dd></div>
         <div><dt>Healthy status range</dt><dd>{service.accepted_status[0]}–{service.accepted_status[1]}</dd></div>
         <div><dt>Timeout</dt><dd>{service.timeout_seconds}s</dd></div>
+        <div><dt>Check type</dt><dd>{service.check_mode === "full" ? "Full site" : "Quick (this URL only)"}</dd></div>
         <div><dt>Incident severity</dt><dd><SeverityBadge severity={service.severity} /></dd></div>
         {service.last_error && (
           <div><dt>Last error</dt><dd>{service.last_error_type}: {service.last_error}</dd></div>
         )}
       </dl>
+
+      <SiteComponents service={service} site={site} onChanged={reload} />
 
       <Card title="Response-time trend">
         <ResponseTimeChart checks={checks} />

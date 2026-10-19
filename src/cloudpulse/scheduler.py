@@ -40,7 +40,7 @@ def lease_owner_id(kind: str) -> str:
 
 def lease_ttl(interval_seconds: float, services: list[ServiceConfig]) -> float:
     """Long enough to cover one full round plus the gap until the next one."""
-    worst_round = sum(s.timeout_seconds for s in services)
+    worst_round = sum(s.max_check_seconds for s in services)
     return interval_seconds * 2 + worst_round + 30
 
 
@@ -68,7 +68,10 @@ class MonitorRunner:
         if entry is None:
             raise ServiceNotFoundError(f"Service {name!r} is not configured.")
         with self.lock:
-            return run_services([entry.service], self.deps, self._config(0.0))
+            # "Check now" also refreshes full-site discovery.
+            return run_services(
+                [entry.service], self.deps, self._config(0.0), force_discover=True
+            )
 
     def check_all(self, *, min_interval: float = 0.0) -> RunSummary:
         """Check every enabled service."""

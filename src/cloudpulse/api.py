@@ -23,11 +23,14 @@ Write routes (only when the request context allows writes — see
     DELETE /api/services/{name}         delete a service
     POST   /api/services/{name}/check   check one service now
     POST   /api/checks                  check all enabled services now
+    POST   /api/services/{name}/components            add a page/backend manually
+    POST   /api/services/{name}/components/{action}   disable | enable | remove
 
 Every URL is validated with the SSRF policy when saved (including DNS
 resolution) and again by the checker on every check and redirect.
 """
 
+import contextlib
 import logging
 import re
 from collections.abc import Mapping
@@ -67,6 +70,9 @@ _PUBLIC_CHECK_FIELDS = (
     "error",
     "error_type",
     "redirects",
+    "check_mode",
+    "component_counts",
+    "failed_components",
 )
 WRITE_METHODS = ("POST", "PUT", "DELETE")
 
@@ -344,6 +350,14 @@ class DashboardApi:
             _reject_unknown(query, {"limit"})
             limit = _int_param(query, "limit", 100, 1, MAX_CHECKS)
             return 200, self.service_detail(self._entry(name), limit)
+        if len(parts) in (3, 4) and parts[0] == "services" and parts[2] == "components":
+            only("POST")
+            _reject_unknown(query, set())
+            action = parts[3] if len(parts) == 4 else "add"
+            if action not in ("add", "disable", "enable", "remove"):
+                raise ApiError(404, "not_found", "Unknown endpoint.")
+            entry = self._entry(_valid_name(parts[1]))
+            return 200, self.change_component(entry, action, _object_body(body))
         if len(parts) == 3 and parts[0] == "services" and parts[2] == "check":
             only("POST")
             _reject_unknown(query, set())
@@ -487,7 +501,147 @@ class DashboardApi:
             "service": self.service_summary(entry),
             "checks": checks,
             "incidents": incidents,
+            "site": self.site_view(entry),
         }
+
+    # -- full-site components ------------------------------------------------
+
+    def site_view(self, entry: ServiceEntry) -> dict[str, Any]:
+        from cloudpulse.site_check import SiteLimits, load_profile
+
+        profile = load_profile(self.incidents, entry.service.name)
+        components = [dict(c) for c in profile.last_components]
+        seen = {c.get("url") for c in components}
+        for manual in profile.manual:
+            shown = redact_url(manual["url"])
+            if shown not in seen:
+                pending = "disabled" if shown in profile.disabled else "pending"
+                components.append(
+                    {
+                        "url": shown,
+                        "kind": manual["kind"],
+                        "source": "manual",
+                        "status": pending,
+                        "status_code": None,
+                        "response_time_ms": None,
+                        "error": None,
+                        "error_type": None,
+                    }
+                )
+        limits = SiteLimits()
+        return {
+            "check_mode": entry.service.check_mode,
+            "discovered_at": (
+                to_utc_iso(profile.discovered_at) if profile.discovered_at else None
+            ),
+            "last_checked_at": (
+                to_utc_iso(profile.last_checked_at) if profile.last_checked_at else None
+            ),
+            "components": components,
+            "limits": {
+                "max_manual": limits.max_manual,
+                "max_backends": limits.max_backends,
+                "max_pages": limits.max_pages,
+            },
+        }
+
+    def change_component(
+        self, entry: ServiceEntry, action: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        from cloudpulse.site_check import SiteProfile
+
+        name = entry.service.name
+        raw_url = body.get("url")
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            raise ApiError(400, "validation_error", "A URL is required.", field="url")
+        raw_url = raw_url.strip()
+        lock = self.runner.lock if self.runner is not None else contextlib.nullcontext()
+        with lock:
+            profile = SiteProfile.from_dict(name, self.incidents.get_site_profile(name))
+            if action == "add":
+                self._add_component(profile, raw_url, body.get("kind", "backend"))
+            else:
+                self._toggle_component(entry, profile, action, redact_url(raw_url))
+            self.incidents.save_site_profile(name, profile.to_dict())
+        return {"site": self.site_view(entry)}
+
+    def _add_component(self, profile: Any, raw_url: str, kind: Any) -> None:
+        from cloudpulse.site_check import MANUAL_KINDS, SiteLimits
+
+        if kind not in MANUAL_KINDS:
+            raise ApiError(
+                400,
+                "validation_error",
+                "Type must be 'backend' or 'page'.",
+                field="kind",
+            )
+        url = self.registry.validate_component_url(raw_url)
+        shown = redact_url(url)
+        if any(redact_url(m["url"]) == shown for m in profile.manual):
+            raise ApiError(
+                400, "validation_error", "This URL is already listed.", field="url"
+            )
+        max_manual = SiteLimits().max_manual
+        if len(profile.manual) >= max_manual:
+            raise ApiError(
+                400,
+                "validation_error",
+                f"You can add at most {max_manual} components yourself.",
+            )
+        profile.manual.append({"url": url, "kind": kind})
+
+    def _toggle_component(
+        self, entry: ServiceEntry, profile: Any, action: str, shown: str
+    ) -> None:
+        known = {c.get("url") for c in profile.last_components}
+        known |= {redact_url(m["url"]) for m in profile.manual}
+        known |= {redact_url(b) for b in profile.backends}
+        if shown not in known:
+            raise ApiError(404, "not_found", "That component is not listed.")
+        if action == "disable":
+            if shown == redact_url(entry.service.url):
+                raise ApiError(
+                    400,
+                    "validation_error",
+                    "The main page is always checked.",
+                    field="url",
+                )
+            if shown not in profile.disabled:
+                profile.disabled.append(shown)
+            self._set_snapshot_status(profile, shown, "disabled")
+        elif action == "enable":
+            profile.disabled = [u for u in profile.disabled if u != shown]
+            self._set_snapshot_status(profile, shown, "pending")
+        else:  # remove: only components the user added
+            before = len(profile.manual)
+            profile.manual = [
+                m for m in profile.manual if redact_url(m["url"]) != shown
+            ]
+            if len(profile.manual) == before:
+                raise ApiError(
+                    400,
+                    "validation_error",
+                    "Only components you added yourself can be removed; turn "
+                    "discovered ones off instead.",
+                    field="url",
+                )
+            profile.disabled = [u for u in profile.disabled if u != shown]
+            profile.last_components = [
+                c for c in profile.last_components if c.get("url") != shown
+            ]
+
+    @staticmethod
+    def _set_snapshot_status(profile: Any, shown: str, status: str) -> None:
+        """Reflect a user change in the last-check snapshot right away."""
+        for component in profile.last_components:
+            if component.get("url") == shown:
+                component.update(
+                    status=status,
+                    status_code=None,
+                    response_time_ms=None,
+                    error=None,
+                    error_type=None,
+                )
 
     def overview(self) -> dict[str, Any]:
         entries = self.registry.entries()

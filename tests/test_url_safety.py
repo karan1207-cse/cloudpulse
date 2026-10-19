@@ -84,6 +84,9 @@ def test_public_addresses_are_allowed(address):
         "http://[::1]:8080/",
         "http://169.254.169.254/latest/meta-data/",
         "http://10.1.2.3/",
+        "http://localhost:5000/api",
+        "http://LOCALHOST./",
+        "http://app.localhost/",
     ],
 )
 def test_policy_blocks_ip_literals(url):

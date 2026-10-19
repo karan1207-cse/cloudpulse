@@ -134,8 +134,25 @@ def build_dependencies(
 
 
 def build_monitor(
-    service: ServiceConfig, deps: Dependencies, config: AppConfig
+    service: ServiceConfig,
+    deps: Dependencies,
+    config: AppConfig,
+    *,
+    force_discover: bool = False,
 ) -> MonitoringService:
+    checker: Any = deps.checker
+    if service.check_mode == "full":
+        from cloudpulse.site_check import FullSiteChecker
+
+        checker = FullSiteChecker(
+            storage=deps.incidents,
+            policy=config.url_policy,
+            transport=getattr(deps.checker, "transport", None),
+            clock=deps.clock,
+            backend_timeout=service.backend_timeout_seconds,
+            force_discover=force_discover,
+            max_redirects=config.max_redirects,
+        )
     return MonitoringService(
         service_url=service.url,
         service_name=service.name,
@@ -146,7 +163,7 @@ def build_monitor(
         escalation_threshold=service.escalation_threshold,
         history=deps.history,
         incident_storage=deps.incidents,
-        checker=deps.checker,
+        checker=checker,
         notifier=deps.notifier,
         clock=deps.clock,
         min_check_interval_seconds=config.min_check_interval_seconds,

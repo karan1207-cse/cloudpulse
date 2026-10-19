@@ -95,6 +95,8 @@ const valid: FormValues = {
   accepted_low: "200",
   accepted_high: "399",
   enabled: true,
+  check_mode: "full",
+  backend_timeout_seconds: "20",
 };
 
 describe("validateForm", () => {
@@ -109,6 +111,8 @@ describe("validateForm", () => {
       severity: "HIGH",
       accepted_status: [200, 399],
       enabled: true,
+      check_mode: "full",
+      backend_timeout_seconds: 20,
     });
   });
 
@@ -158,6 +162,8 @@ describe("API client writes", () => {
         severity: "HIGH",
         accepted_status: [200, 399],
         enabled: true,
+        check_mode: "full",
+        backend_timeout_seconds: 20,
       });
     } finally {
       setAdminToken(null);

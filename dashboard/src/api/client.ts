@@ -12,6 +12,7 @@ import type {
   ServiceDetail,
   ServiceInput,
   ServiceSummary,
+  SiteView,
 } from "./types";
 
 export { ApiError };
@@ -28,6 +29,12 @@ export interface CloudPulseApi {
   deleteService(name: string): Promise<void>;
   checkService(name: string): Promise<CheckResult>;
   checkAll(): Promise<CheckAllResult>;
+  addComponent(service: string, url: string, kind: "page" | "backend"): Promise<{ site: SiteView }>;
+  componentAction(
+    service: string,
+    action: "disable" | "enable" | "remove",
+    url: string,
+  ): Promise<{ site: SiteView }>;
 }
 
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -135,6 +142,16 @@ export function createHttpApi(baseUrl = "", fetchImpl: typeof fetch = fetch): Cl
       }),
     checkAll: () =>
       request<CheckAllResult>("/api/checks", { method: "POST", timeoutMs: CHECK_TIMEOUT_MS }),
+    addComponent: (service, url, kind) =>
+      request<{ site: SiteView }>(`${servicePath(service)}/components`, {
+        method: "POST",
+        body: { url, kind },
+      }),
+    componentAction: (service, action, url) =>
+      request<{ site: SiteView }>(`${servicePath(service)}/components/${action}`, {
+        method: "POST",
+        body: { url },
+      }),
   };
 }
 

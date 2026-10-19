@@ -33,7 +33,11 @@ _SERVICE_KEYS = {
     "accepted_status",
     "escalation_threshold",
     "enabled",
+    "check_mode",
+    "backend_timeout_seconds",
 }
+CHECK_MODES = ("quick", "full")
+MAX_BACKEND_TIMEOUT = 60.0
 PRIVATE_TARGET_HINT = (
     "For security, CloudPulse only monitors public internet addresses "
     "(not localhost, private networks or cloud metadata endpoints)."
@@ -54,6 +58,19 @@ class ServiceConfig:
     accepted_status: tuple[int, int] = (200, 399)
     escalation_threshold: int | None = None
     enabled: bool = True
+    # "quick": only this URL. "full": the page, its own assets, a few
+    # same-site pages and the backend APIs its JavaScript talks to.
+    check_mode: str = "quick"
+    backend_timeout_seconds: float = 20.0
+
+    @property
+    def max_check_seconds(self) -> float:
+        """Upper bound of one check, used for time budgets."""
+        if self.check_mode == "full":
+            from cloudpulse.site_check import FULL_CHECK_BUDGET_SECONDS
+
+            return FULL_CHECK_BUDGET_SECONDS
+        return self.timeout_seconds
 
     def to_storage_dict(self) -> dict[str, Any]:
         """Full definition (including the unredacted URL) for persistence."""
@@ -66,6 +83,8 @@ class ServiceConfig:
             "accepted_status": list(self.accepted_status),
             "escalation_threshold": self.escalation_threshold,
             "enabled": self.enabled,
+            "check_mode": self.check_mode,
+            "backend_timeout_seconds": self.backend_timeout_seconds,
         }
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -80,6 +99,8 @@ class ServiceConfig:
             "accepted_status": list(self.accepted_status),
             "escalation_threshold": self.escalation_threshold,
             "enabled": self.enabled,
+            "check_mode": self.check_mode,
+            "backend_timeout_seconds": self.backend_timeout_seconds,
         }
 
 
@@ -273,6 +294,21 @@ def parse_service(
     if not isinstance(enabled, bool):
         raise fail("enabled", "enabled must be true or false.")
 
+    check_mode = raw.get("check_mode", "quick")
+    if check_mode not in CHECK_MODES:
+        raise fail("check_mode", "Check mode must be 'quick' or 'full'.")
+
+    backend_timeout = raw.get("backend_timeout_seconds", 20.0)
+    if (
+        isinstance(backend_timeout, bool)
+        or not isinstance(backend_timeout, int | float)
+        or not (1 <= backend_timeout <= MAX_BACKEND_TIMEOUT)
+    ):
+        raise fail(
+            "backend_timeout_seconds",
+            f"Backend timeout must be between 1 and {MAX_BACKEND_TIMEOUT:g} seconds.",
+        )
+
     return ServiceConfig(
         name=name,
         url=url,
@@ -282,6 +318,8 @@ def parse_service(
         accepted_status=accepted_range,
         escalation_threshold=escalation,
         enabled=enabled,
+        check_mode=check_mode,
+        backend_timeout_seconds=float(backend_timeout),
     )
 
 

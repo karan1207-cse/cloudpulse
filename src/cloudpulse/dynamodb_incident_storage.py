@@ -34,6 +34,7 @@ from cloudpulse.incident_manager import Incident, incident_from_dict
 from cloudpulse.state import ServiceState
 
 LEASE_PREFIX = "__lease__:"
+SITE_PREFIX = "__site__:"
 SERVICE_INDEX = "service-created-index"
 STATUS_INDEX = "status-created-index"
 _IMMUTABLE_FIELDS = {"id"}
@@ -295,3 +296,25 @@ class DynamoDBIncidentStorage:
                 raise StorageError(
                     f"Releasing lease failed: {error_code(exc)}"
                 ) from exc
+
+    # -- site profiles (full-site checks) --------------------------------------
+
+    def get_site_profile(self, service: str) -> dict[str, Any] | None:
+        table = self._require_state_table()
+        response = aws_call(
+            "Reading site profile",
+            table.get_item,
+            Key={"service": SITE_PREFIX + service},
+        )
+        item = response.get("Item")
+        if not item or not isinstance(item.get("profile"), dict):
+            return None
+        return from_dynamo(item["profile"])
+
+    def save_site_profile(self, service: str, profile: dict[str, Any]) -> None:
+        table = self._require_state_table()
+        aws_call(
+            "Saving site profile",
+            table.put_item,
+            Item={"service": SITE_PREFIX + service, "profile": to_dynamo(profile)},
+        )

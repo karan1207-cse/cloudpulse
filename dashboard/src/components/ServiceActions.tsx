@@ -15,6 +15,9 @@ export function describeCheck(result: CheckResult): string {
     return `${name} is healthy (HTTP ${outcome.status_code}, ${formatMs(outcome.response_time_ms)}).${recovered}`;
   }
   const opened = outcome.transition === "INCIDENT_OPENED" ? " An incident was opened." : "";
+  if (outcome.check_mode === "full" && outcome.error) {
+    return `${name} is not healthy: ${outcome.error}.${opened}`;
+  }
   const detail = outcome.status_code ? `HTTP ${outcome.status_code}` : outcome.error_type ?? "error";
   return `${name} is not healthy (${detail}).${opened}`;
 }

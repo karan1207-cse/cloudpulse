@@ -11,6 +11,7 @@ import type {
   Overview,
   ServiceDetail,
   ServiceSummary,
+  SiteView,
 } from "./types";
 import { SEVERITIES } from "./types";
 
@@ -137,6 +138,31 @@ const incidents: Incident[] = [
   },
 ];
 
+function demoSite(service: ServiceSummary): SiteView {
+  const failing = service.status === "unhealthy";
+  const origin = new URL(service.url).origin;
+  return {
+    check_mode: "full",
+    discovered_at: minutes(30),
+    last_checked_at: service.last_checked_at,
+    limits: { max_manual: 10, max_backends: 5, max_pages: 10 },
+    components: [
+      { url: `${origin}/`, kind: "page", source: "main", role: "main", status: "up", status_code: 200, response_time_ms: 182, error: null, error_type: null },
+      { url: `${origin}/assets/index-demo.js`, kind: "asset", source: "html", status: "up", status_code: 200, response_time_ms: 95, error: null, error_type: null },
+      {
+        url: "https://demo-api.example.com/",
+        kind: "backend",
+        source: "discovered",
+        status: failing ? "down" : "up",
+        status_code: failing ? null : 404,
+        response_time_ms: failing ? 20000 : 310,
+        error: failing ? "Request timed out." : null,
+        error_type: failing ? "TIMEOUT" : null,
+      },
+    ],
+  };
+}
+
 const readOnly = () =>
   Promise.reject(
     new ApiError(
@@ -166,6 +192,8 @@ export const demoApi: CloudPulseApi = {
   deleteService: readOnly,
   checkService: readOnly,
   checkAll: readOnly,
+  addComponent: readOnly,
+  componentAction: readOnly,
   async overview(): Promise<Overview> {
     return {
       generated_at: new Date(BASE).toISOString(),
@@ -194,6 +222,7 @@ export const demoApi: CloudPulseApi = {
       service,
       checks: checksFor(service, 40),
       incidents: incidents.filter((i) => i.service_name === name),
+      site: demoSite(service),
     };
   },
   async incidents(query): Promise<IncidentPage> {

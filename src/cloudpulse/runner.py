@@ -76,6 +76,7 @@ def run_services(
     *,
     remaining_time_ms: Callable[[], int] | None = None,
     reserve_ms: int = DEFAULT_RESERVE_MS,
+    force_discover: bool = False,
 ) -> RunSummary:
     """Run one check per service, sequentially.
 
@@ -87,12 +88,14 @@ def run_services(
     summary = RunSummary(started_at=to_utc_iso(deps.clock()))
     for service in services:
         if remaining_time_ms is not None:
-            needed = int(service.timeout_seconds * 1000) + reserve_ms
+            needed = int(service.max_check_seconds * 1000) + reserve_ms
             if remaining_time_ms() < needed:
                 summary.skipped_for_time.append(service.name)
                 continue
         try:
-            outcome = build_monitor(service, deps, config).run()
+            outcome = build_monitor(
+                service, deps, config, force_discover=force_discover
+            ).run()
         except Exception as exc:
             logger.exception("Checking service %s failed", service.name)
             summary.failures.append(

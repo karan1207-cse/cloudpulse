@@ -30,13 +30,24 @@ npm audit
 | Baseline with `PYTHONPATH=src` | 46 passed |
 | `ruff check src tests` | All checks passed |
 | `ruff format --check src tests` | 55 files already formatted |
-| `pytest` | **461 passed**, 0 failed, 0 skipped (~65 s; moto set-up dominates) |
-| `pytest --cov` | **93 %** branch coverage of `src/cloudpulse` |
+| `pytest` | **529 passed**, 0 failed, 0 skipped (~95 s; moto set-up dominates) |
+| `pytest --cov` | **92 %** branch coverage of `src/cloudpulse` |
 | Dashboard `npm run lint` / `typecheck` | clean |
-| Dashboard `npm test` | **56 passed** |
-| Dashboard `npm run build` | OK (≈185 kB JS, 59 kB gzip) |
+| Dashboard `npm test` | **67 passed** |
+| Dashboard `npm run build` | OK (≈195 kB JS, 61 kB gzip) |
 | `npm audit` | 0 vulnerabilities |
 | Terraform | not run locally (not installed); HCL parsed with `python-hcl2` and variable/local references cross-checked; `fmt -check` + `validate` run in CI |
+
+Manual full-site check (2026-10-20, GET only) of
+`https://expense-tracker-feb75.web.app/`: the page (200), its JS bundle and
+CSS were up, and the only backend found in the bundle was
+`axios.create({baseURL:"http://localhost:5000/api"})`. CloudPulse reported the
+site **Unhealthy** — "Backend http://localhost:5000/ points to a
+local/private address, so visitors' browsers cannot reach it" — without
+contacting localhost. This matches the reported "Quick Add" failure: the
+deployed build calls a development API URL. Adding the site through the
+dashboard (Full site, the default) produced the same result and showed the
+components under *What we check*.
 
 Manual end-to-end check of service management (port 8820, fresh data
 directory): the empty dashboard showed the first-run call to action; adding
@@ -72,8 +83,9 @@ response-time trend in the browser.
 | Lambda | `test_aws_lambda.py` | scheduled event end-to-end with moto DynamoDB + SNS, duplicate delivery, recovery across cold starts, event validation, time budget, SNS failure, partial and total storage failure, SSRF via DNS in Lambda, warm-start reuse, EMF shape |
 | Service list | `test_service_store.py` | store contract on memory/JSON/DynamoDB, corrupt records, registry merge, field-specific validation, DNS-to-private rejection, DNS-failure warning, duplicates, 50 limit, read-only services-file entries, import |
 | Write API | `test_api_write.py` | create/update/delete/check-now/check-all, validation and SSRF errors with `field`, 401/403 permission matrix, admin token (constant time, weak tokens rejected, never in repr), real server: loopback writes, cross-site block, Host check, 415/400/413, preflight, rate limits |
+| Full-site checks | `test_site_check.py`, `test_api_components.py` | HTML analysis of a Vite/React-shaped SPA, bundle scanning (onrender.com API found; fonts/react.dev/sentry/googleapis/w3.org filtered), backend patterns (axios baseURL, API_URL, VITE_*, fetch), GET-only polite requests without cookies, 404/401/405 = up, frontend 200 + backend timeout = unhealthy naming the backend, 5xx/missing asset/broken page, private backend never contacted, DNS-to-private blocked, redirect to metadata blocked, caps (pages/assets/backends/bytes/time), discovery cache + rediscovery (new bundle, 6 h, Check now), turn off / manual components, persistence on memory/JSON/DynamoDB, incident + notification wording, compact history, API add/disable/enable/remove with SSRF validation |
 | Scheduler | `test_scheduler.py` | lease exclusivity/expiry/renewal/release on all backends, cross-process JSON lease, concurrent acquire has one winner, background ticks, skipping recently checked services, start/stop, `run --loop` refusal, `services` CLI |
-| Dashboard | `dashboard/src/test/dashboard.test.tsx`, `services.test.tsx` | API client (query strings, errors, timeouts), demo mode opt-in + banner, overview, loading/error/retry, services table, incident filters/sort/pagination, detail page chart + timeline, 404, routing |
+| Dashboard | `dashboard/src/test/dashboard.test.tsx`, `services.test.tsx`, `site.test.tsx` | API client (query strings, errors, timeouts), demo mode opt-in + banner, overview, loading/error/retry, services table, incident filters/sort/pagination, detail page chart + timeline, 404, routing |
 
 ## Rules the suite follows
 

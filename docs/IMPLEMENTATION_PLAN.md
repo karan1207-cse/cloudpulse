@@ -115,6 +115,7 @@ dashboard must talk to a real backend.
 | 7 API + dashboard | read-only API with validation/tests; React+TS dashboard with 4 pages, filters, sorting, pagination, demo mode clearly labelled | Done |
 | 8 Terraform + CI | tables/GSIs, Lambda, IAM, EventBridge, SNS, logs, alarms, outputs; CI for Python, frontend, Terraform; manual deploy workflow with OIDC | Written and HCL-parsed; **`fmt -check`/`validate` not run locally** (Terraform not installed) — they run in CI. **Not deployed.** |
 | 9 Security + docs | SSRF guard with DNS + connected-peer validation, redirect re-validation, docs | Done |
+| 11 Full-site checks | Per-service check mode (Full site default in the form); discovery of assets/pages/backends from the main URL; GET-only, SSRF-guarded, bounded probing; plain-language failing component in incidents/notifications; *What we check* with turn off / manual add; honest limitations | Done (mock-tested; manually verified against the user's site) |
 | 10 Service management | Add/edit/delete URLs and check now from the dashboard; background checks in `serve`; one service list for CLI, API and Lambda (JSON/DynamoDB store, services file still supported); local-only or admin-token writes; CSRF/DNS-rebinding/size/rate limits | Done (DynamoDB store mock-tested; not deployed) |
 
 ## 4. Bugs fixed (each has a regression test)
@@ -137,6 +138,9 @@ dashboard must talk to a real backend.
 | 14 | CLI turned storage `ValueError` into usage errors; no exit codes | Typed errors → exit codes 0/1/2/3/130 | `test_cli_commands.py` |
 | 15 | `cloudpulse check <url>` failed when the unrelated services file was invalid | One-off commands skip loading services | `test_check_ignores_unrelated_services_file` |
 | 16 | On Windows, writing a JSON file failed ("Access is denied") while another thread read it — triggered by the API and scheduler sharing `serve` | Retry `os.replace` briefly on sharing violations | `test_write_retries_transient_windows_sharing_violation`, `test_concurrent_acquire_has_single_winner` |
+| 18 | A deployed SPA showed Healthy while its backend was unreachable (static hosting answers 200) | Full-site check mode | `test_frontend_ok_but_backend_timeout_is_unhealthy`, `test_discovered_private_backend_is_never_contacted_and_counts_as_down` |
+| 19 | `localhost`/`*.localhost` URLs were only blocked after DNS resolution | Blocked at the URL check (RFC 6761) | `test_policy_blocks_ip_literals[http://localhost:5000/api]` |
+| 20 | Removing a manual component left it visible until the next check | Update the component snapshot on remove/disable/enable | `test_add_manual_backend_then_disable_enable_remove` |
 | 17 | Dark-mode contrast: white text on light red for CRITICAL badges and the delete confirmation | Use the background colour for text on red | manual check |
 
 ## 5. Remaining work / not done

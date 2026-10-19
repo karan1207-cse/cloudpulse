@@ -31,6 +31,7 @@ def _validate_limit(limit: int) -> int:
 
 
 LEASE_PREFIX = "__lease__:"
+SITE_PREFIX = "__site__:"
 _LEASE_LOCK = threading.Lock()
 
 
@@ -196,6 +197,18 @@ class _LocalIncidentStore:
             if isinstance(current, dict) and current.get("owner") == owner:
                 del states[key]
                 self._save_states(states)
+
+    # -- site profiles (full-site checks) --------------------------------------
+
+    def get_site_profile(self, service: str) -> dict[str, Any] | None:
+        value = self._load_states().get(SITE_PREFIX + service)
+        return dict(value) if isinstance(value, dict) else None
+
+    def save_site_profile(self, service: str, profile: dict[str, Any]) -> None:
+        with self._state_mutex():
+            states = self._load_states()
+            states[SITE_PREFIX + service] = dict(profile)
+            self._save_states(states)
 
 
 class InMemoryIncidentStorage(_LocalIncidentStore):

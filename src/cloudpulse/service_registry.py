@@ -127,6 +127,17 @@ class ServiceRegistry:
             ]
         return []
 
+    def validate_component_url(self, url: str) -> str:
+        """Validate a manually added page/backend URL (syntax, SSRF, DNS)."""
+        try:
+            self.config.url_policy.check_url(url)
+        except BlockedDestinationError as exc:
+            raise ServiceValidationError("url", f"{exc} {PRIVATE_TARGET_HINT}") from exc
+        except UnsafeURLError as exc:
+            raise ServiceValidationError("url", str(exc)) from exc
+        self._dns_warnings(ServiceConfig(name="component", url=url))
+        return url
+
     # -- writing -------------------------------------------------------------
 
     def _require_store(self) -> ServiceStore:

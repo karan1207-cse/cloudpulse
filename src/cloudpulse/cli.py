@@ -127,6 +127,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="healthy status range (default 200-399)",
     )
     p.add_argument("--json", action="store_true", help="print JSON")
+    p.add_argument(
+        "--full",
+        action="store_true",
+        help="full-site check: also the page's assets, pages and backend APIs",
+    )
+    p.add_argument(
+        "--backend-timeout",
+        type=_positive_float,
+        default=20.0,
+        help="seconds to wait for each backend in --full mode (default 20)",
+    )
 
     p = sub.add_parser(
         "run", parents=[common], help="check configured services and persist results"
@@ -233,6 +244,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--threshold", type=int, help="failures before an incident")
     sp.add_argument("--severity", choices=SEVERITIES, type=str.upper)
     sp.add_argument("--accepted-status", type=_status_range, metavar="LOW-HIGH")
+    sp.add_argument(
+        "--full",
+        action="store_true",
+        help="full-site check (page, assets, pages and backend APIs)",
+    )
     sp = services_sub.add_parser("remove", help="delete a service")
     sp.add_argument("name")
     services_sub.add_parser(
@@ -287,7 +303,51 @@ def _table(rows: list[list[Any]], headers: list[str]) -> None:
 # -- commands -----------------------------------------------------------------
 
 
+def _print_components(result: dict[str, Any], components: list[dict]) -> None:
+    rows = [
+        [
+            c["kind"] if c.get("role") != "main" else "main page",
+            c["status"],
+            c.get("status_code"),
+            c.get("response_time_ms"),
+            c["url"],
+        ]
+        for c in components
+    ]
+    _table(rows, ["TYPE", "STATUS", "HTTP", "MS", "URL"])
+
+
 def cmd_check(args: argparse.Namespace, config: AppConfig) -> int:
+    if args.full:
+        from cloudpulse.incident_storage import InMemoryIncidentStorage
+        from cloudpulse.site_check import FullSiteChecker, load_profile
+
+        storage = InMemoryIncidentStorage()
+        site = FullSiteChecker(
+            storage=storage,
+            policy=config.url_policy,
+            backend_timeout=args.backend_timeout,
+            force_discover=True,
+            max_redirects=config.max_redirects,
+        )
+        name = redact_url(args.url)
+        result = site.check(
+            args.url,
+            service=name,
+            timeout=args.timeout,
+            accepted_status=args.accepted_status,
+        )
+        components = load_profile(storage, name).last_components
+        if args.json:
+            _print_json({**result, "components": components})
+        else:
+            state = "HEALTHY" if result["is_healthy"] else "UNHEALTHY"
+            print(f"{state}  {result['url']}  (full-site check)")
+            if result["error"]:
+                print(f"  problem: {result['error']}")
+            _print_components(result, components)
+        return EXIT_OK if result["is_healthy"] else EXIT_UNHEALTHY
+
     checker = HttpHealthChecker(
         policy=config.url_policy, max_redirects=config.max_redirects
     )
@@ -666,6 +726,8 @@ def cmd_services(args: argparse.Namespace, config: AppConfig) -> int:
             data["severity"] = args.severity
         if args.accepted_status:
             data["accepted_status"] = list(args.accepted_status)
+        if args.full:
+            data["check_mode"] = "full"
         service, warnings = registry.create(data)
         print(f"Added {service.name} ({redact_url(service.url)}).")
         for warning in warnings:

@@ -105,6 +105,10 @@ its next run, and **Check now** runs a check from your machine. Your own
 identity needs `dynamodb:GetItem`, `Query`, `Scan`, `PutItem`, `UpdateItem`
 and `DeleteItem` on the tables (and indexes).
 
+Full-site checks can take up to 90 seconds per service, so the Lambda
+timeout defaults to 180 seconds (`lambda_timeout_seconds`); services that
+cannot finish in the remaining time are skipped and reported, not cut off.
+
 ## 7. Changing the schedule
 
 Edit `schedule_expression` (`rate(1 minute)`, `rate(15 minutes)`,
