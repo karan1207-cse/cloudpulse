@@ -1,0 +1,7 @@
+# Development and CI dependencies (pinned). Install with:
+#   python -m pip install -r requirements-dev.txt
+-r requirements.txt
+pytest==9.1.1
+pytest-cov==7.1.0
+ruff==0.17.1
+moto==5.2.4

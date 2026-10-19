@@ -1,4 +1,3 @@
-
 """Tests for the CloudPulse command-line interface."""
 
 from unittest.mock import patch
@@ -8,12 +7,15 @@ from cloudpulse.cli import main
 
 def test_cli_prints_successful_health_check(capsys):
     with (
-        patch("sys.argv", [
-            "cloudpulse",
-            "https://example.com",
-            "--interval",
-            "1",
-        ]),
+        patch(
+            "sys.argv",
+            [
+                "cloudpulse",
+                "https://example.com",
+                "--interval",
+                "1",
+            ],
+        ),
         patch(
             "cloudpulse.cli.MonitoringService.run_check",
             return_value={

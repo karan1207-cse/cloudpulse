@@ -1,4 +1,3 @@
-
 """Tests for the health-check module."""
 
 from unittest.mock import patch
@@ -28,6 +27,7 @@ def test_network_failure():
     assert result["is_healthy"] is False
     assert result["error"] is not None
     assert result["response_time_ms"] >= 0
+
 
 def test_http_error():
     from urllib.error import HTTPError

@@ -1,4 +1,3 @@
-
 """Tests for JSON-backed health-check storage."""
 
 import json

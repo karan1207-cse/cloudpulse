@@ -1,50 +1,179 @@
-# CloudPulse — Initial Architecture
+# CloudPulse — Architecture
+
+This document describes what is implemented in the repository. Where
+something is only planned or not deployed, it says so.
 
 ## 1. Purpose
 
-CloudPulse is a cloud reliability and incident response platform that monitors application health, detects failures, tracks incidents, and identifies when services recover.
+CloudPulse monitors HTTP(S) endpoints, detects repeated failures, opens
+incidents, detects recovery, persists history and state, notifies people, and
+presents the data in a dashboard. Core logic is plain Python with no cloud
+dependencies; AWS services are adapters around it.
 
-## 2. Planned Architecture
+## 2. Components
 
-1. **Scheduler:** Amazon EventBridge periodically triggers health checks.
-2. **Health Monitor:** AWS Lambda checks target endpoints and measures response time.
-3. **Incident Manager:** Evaluates failures, severity, deduplication, and recovery.
-4. **Storage:** Amazon DynamoDB stores monitoring results and incident history.
-5. **Alerting:** Amazon SNS sends notifications about important incidents.
-6. **Dashboard:** React and TypeScript display service health and incident history.
-7. **Infrastructure:** Terraform defines cloud resources and GitHub Actions automates testing.
+| Layer | Module(s) | Responsibility |
+| --- | --- | --- |
+| URL safety | `url_safety.py` | Syntax/scheme validation, SSRF policy, URL redaction |
+| Checker | `health_check.py` | Guarded HTTP transport, redirects, timeouts, typed errors |
+| State machine | `incident_manager.py`, `state.py` | Incident model, transitions, serialization, persisted state |
+| Orchestration | `monitor.py`, `runner.py` | One check per service; many services with isolation and time budget |
+| Storage | `storage.py` + adapters | Protocols; in-memory, JSON, DynamoDB implementations |
+| Notifications | `notifications.py` | Message formatting; logging, SNS, composite notifiers |
+| Configuration | `config.py`, `factory.py` | Env/services-file validation; backend wiring |
+| Entry points | `cli.py`, `aws_lambda.py`, `api_server.py` | CLI, Lambda handler, local HTTP server |
+| API | `api.py` | Read-only JSON views for the dashboard |
+| Observability | `observability.py` | JSON logs, CloudWatch EMF metrics |
+| Dashboard | `dashboard/` | React + TypeScript single-page app |
+| Infrastructure | `infra/terraform/` | DynamoDB, Lambda, IAM, EventBridge, SNS, CloudWatch |
 
-## 3. Development Approach
+All collaborators of `MonitoringService` are injected: checker (HTTP
+client), history storage, incident/state storage, notifier and clock. Tests
+use a fixed clock and scripted checkers/transports.
 
-The first version will be developed and tested locally before AWS integration. Core monitoring and incident logic will remain separate from cloud-specific services where practical.
+## 3. Check flow
 
-## 4. Initial Monitoring Results
+```mermaid
+sequenceDiagram
+    participant S as Scheduler (CLI loop / EventBridge)
+    participant M as MonitoringService
+    participant C as HttpHealthChecker
+    participant H as History storage
+    participant T as Incident tracker
+    participant I as Incident + state storage
+    participant N as Notifier
+    S->>M: run()
+    M->>M: skip if checked < min interval ago (duplicate guard)
+    M->>C: check(url, timeout, accepted_status)
+    C-->>M: result {checked_at, is_healthy, status_code, response_time_ms, error_type}
+    M->>H: add(result)  (failure is reported, not fatal)
+    M->>T: evaluate(result) -> Transition
+    M->>I: save_state(version check)  (conflict => reload, abort)
+    M->>I: add/update incident
+    M->>N: send(event)  (only OPENED / ESCALATED / RECOVERED; failures captured)
+```
 
-Each health check will eventually record:
+State is saved **before** the incident record so that, if two workers race,
+only the one whose versioned state write succeeds goes on to create an
+incident. Notifications are sent **last**, so a delivery failure cannot roll
+back or corrupt stored incident state.
 
-- Target URL
-- Check timestamp
-- Success or failure
-- HTTP status code, when available
-- Response time
-- Error details, when applicable
+## 4. Incident state machine
 
-## 5. Incident Lifecycle
+```text
+             failure (n < threshold)            failure (n = threshold)
+HEALTHY ──────────────────────────> FAILING ───────────────────────────> OPEN
+   ^             success               │                                  │ failure
+   └───────────────────────────────────┘                                  ├──> ONGOING
+   ^                                                                      │ failure (n = escalation_threshold)
+   │                     success                                          ├──> ESCALATED (severity -> CRITICAL, once)
+   └────────────────────────────────────── RECOVERED <───────────────────┘
+```
 
-The planned lifecycle is:
+`ServiceIncidentTracker.evaluate()` returns one of `NONE`,
+`FAILURE_RECORDED`, `INCIDENT_OPENED`, `INCIDENT_ONGOING`,
+`INCIDENT_ESCALATED`, `INCIDENT_RECOVERED`. At most one incident per service
+is active.
 
-`HEALTHY → INCIDENT_OPEN → RECOVERED`
+Incident fields: `id`, `service_name`, `service_url`, `severity`, `status`,
+`created_at`, `updated_at`, `recovered_at`, `duration_seconds`,
+`failure_count`, `first_failure_at`, `last_failure_at`, `last_error`,
+`last_error_type`, `last_status_code`, `escalated_at`, `diagnostics`
+(threshold, error-type counts, escalation source). All timestamps are
+ISO-8601 UTC with offset; naive timestamps are rejected.
 
-Repeated failures should not create duplicate active incidents for the same service.
+### Restart and inconsistency handling
 
-## 6. Security and Reliability
+On start-up `MonitoringService` loads the service state and all OPEN
+incidents for the service:
 
-- Never commit credentials or secret keys.
-- Set timeouts for outbound health checks.
-- Validate target URLs and handle network errors.
-- Add automated tests for failures, recovery, and duplicate incidents.
-- Review AWS costs and permissions before deployment.
+| Situation | Handling |
+| --- | --- |
+| No state | Start with zero failures |
+| Open incident exists | Restored as the active incident; counter restored |
+| Several open incidents | Newest is active; a warning is recorded; all are recovered together on the next healthy check |
+| State points to a missing/closed incident | Reference cleared, counter kept (next failure reopens immediately), warning recorded |
+| Corrupt JSON / invalid record | `StorageCorruptError` with a clear message; the file is never overwritten |
+| Incident write failed earlier | Next failure re-creates the record from memory |
 
-## 7. Current Status
+## 5. Storage
 
-Milestone 1: Project foundation — in progress.
+Protocols (`storage.py`): `HealthCheckStorage` (`add`, `get_recent`,
+`get_all`, `count`) and `IncidentStorage` (`add`, `get`, `get_all`,
+`list_incidents`, `update`, `get_open_incident(s)`, `get_state`,
+`save_state`, `get_failure_count`, `save_failure_count`, `count`). One shared
+contract test suite runs against the in-memory, JSON and DynamoDB (moto)
+adapters.
+
+### JSON (local)
+
+`data/health_checks.json`, `data/incidents.json`,
+`data/incidents_state.json`. Atomic writes (temp file + `os.replace`),
+bounded history (10 000 records), legacy `{service: count}` state format is
+read and upgraded. Single-process use.
+
+### DynamoDB (AWS)
+
+| Table | Key | Indexes / TTL | Access patterns |
+| --- | --- | --- | --- |
+| `<prefix>-health-checks` | PK `service`, SK `sk` = `checked_at#id` | TTL `expires_at` | Recent checks per service: one `Query`, newest first |
+| `<prefix>-incidents` | PK `id` | GSI `service-created-index` (`service_name`, `created_at`); GSI `status-created-index` (`status`, `created_at`) | Incidents per service; recent OPEN / RECOVERED incidents; by id |
+| `<prefix>-monitor-state` | PK `service` | — | Get/put state with `version` condition |
+
+- No production path scans: listing uses the GSIs; `get_all()`/`count()` are
+  administrative and paginate.
+- Creation uses `attribute_not_exists(id)`; updates use `UpdateItem` with
+  `attribute_exists(id)` (no read-modify-write); state saves require the
+  stored `version` to match.
+- Floats are stored as `Decimal` and converted back on read.
+- `status-created-index` has only two partition values. That is fine at this
+  scale; for very high incident volumes, shard the key (e.g. by month).
+
+## 6. Notifications
+
+`Notifier.send(NotificationEvent)`. Implementations: `LoggingNotifier`,
+`SnsNotifier` (subject ≤ 100 ASCII chars, message attributes `event_type`,
+`severity`, `service`), `CompositeNotifier`, `RecordingNotifier` (tests).
+SNS is only wired for the `aws` backend, so local runs never publish real
+notifications. Messages contain redacted URLs and classified errors only.
+
+## 7. AWS runtime
+
+```mermaid
+flowchart TB
+    EB[EventBridge rule<br/>schedule_expression] -->|lambda:InvokeFunction<br/>source_arn = rule| L[Lambda monitor<br/>python3.13 arm64]
+    L -->|PutItem/Query| H[(health-checks)]
+    L -->|Get/Put/Update/Query| I[(incidents + GSIs)]
+    L -->|Get/Put conditional| S[(monitor-state)]
+    L -->|Publish| T[SNS alerts]
+    L -->|JSON logs + EMF| G[CloudWatch Logs<br/>retention N days]
+    G --> M[Metrics: CloudPulse/*]
+    M --> A[Alarms] --> T
+    T -.->|optional, must be confirmed| E[Email]
+```
+
+Handler behaviour (`aws_lambda.py`): validates config (`CLOUDPULSE_BACKEND=aws`
+required), accepts EventBridge scheduled events or `{"services": [...]}`,
+rejects other shapes, reuses AWS clients on warm starts, skips services that
+cannot finish before the Lambda deadline, records per-service failures,
+raises (so the Errors alarm fires) only when every service failed, and emits
+EMF metrics with a single `Environment` dimension.
+
+Status: **implemented and tested with moto; not deployed.**
+
+## 8. Dashboard and API
+
+The dashboard calls `/api/*` on the same origin (Vite proxy in development,
+`cloudpulse serve --static` in production-like local use). The API is
+read-only, validates every parameter, returns `400/404/405/503/500` with
+generic messages, and redacts URLs. Monitored services come only from
+configuration; there is no registration endpoint. Demo mode is opt-in and
+labelled. No hosted deployment exists.
+
+## 9. Security design
+
+See the README "Security" section for the full list and known limitations.
+Key points: SSRF guard with DNS + connected-peer validation and redirect
+re-validation; bounded timeouts/redirects/page sizes; no response bodies;
+redaction of URLs; least-privilege IAM with a permissions boundary; OIDC for
+CI deploys; read-only, localhost-bound API.

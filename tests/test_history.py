@@ -1,4 +1,3 @@
-
 from cloudpulse.history import HealthCheckHistory
 
 

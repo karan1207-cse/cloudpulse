@@ -1,0 +1,13 @@
+# Remote state (recommended). Copy to backend.tf, fill in, then run
+# `terraform init -migrate-state`. The bucket must already exist, be
+# private, versioned and encrypted. Do not commit backend.tf if it names
+# private resources you would rather not publish.
+terraform {
+  backend "s3" {
+    bucket       = "<your-terraform-state-bucket>"
+    key          = "cloudpulse/dev/terraform.tfstate"
+    region       = "<aws-region>"
+    encrypt      = true
+    use_lockfile = true
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "services": [
+    {
+      "name": "example-site",
+      "url": "https://example.com/",
+      "timeout_seconds": 5,
+      "failure_threshold": 3,
+      "severity": "HIGH",
+      "accepted_status": [200, 399]
+    },
+    {
+      "name": "example-api",
+      "url": "https://example.org/",
+      "timeout_seconds": 5,
+      "failure_threshold": 2,
+      "severity": "MEDIUM",
+      "escalation_threshold": 10,
+      "accepted_status": [200, 299]
+    }
+  ]
+}

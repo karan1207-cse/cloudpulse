@@ -1,4 +1,3 @@
-
 from cloudpulse.incident_manager import Incident
 from cloudpulse.notifications import (
     format_incident_opened,

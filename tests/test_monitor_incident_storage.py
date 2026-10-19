@@ -1,4 +1,3 @@
-
 """Tests for incident persistence in the monitoring workflow."""
 
 from unittest.mock import patch

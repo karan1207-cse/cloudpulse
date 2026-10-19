@@ -1,4 +1,3 @@
-
 """End-to-end tests for the CloudPulse monitoring lifecycle."""
 
 from unittest.mock import patch

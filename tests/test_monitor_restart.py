@@ -1,4 +1,3 @@
-
 """Tests for restoring monitoring state after restart."""
 
 from cloudpulse.incident_storage import JsonIncidentStorage

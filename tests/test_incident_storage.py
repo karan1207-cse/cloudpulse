@@ -1,4 +1,3 @@
-
 """Tests for JSON incident storage."""
 
 from cloudpulse.incident_storage import JsonIncidentStorage
@@ -30,10 +29,12 @@ def test_incident_storage_persists_records(tmp_path):
 
 def test_incident_storage_updates_recovered_incident(tmp_path):
     storage = JsonIncidentStorage(tmp_path / "incidents.json")
-    storage.add({
-        "id": "incident-001",
-        "status": "OPEN",
-    })
+    storage.add(
+        {
+            "id": "incident-001",
+            "status": "OPEN",
+        }
+    )
 
     updated = storage.update(
         "incident-001",
@@ -48,6 +49,7 @@ def test_update_returns_false_for_unknown_incident(tmp_path):
     storage = JsonIncidentStorage(tmp_path / "incidents.json")
 
     assert storage.update("missing-id", {"status": "RECOVERED"}) is False
+
 
 def test_failure_count_persists_after_reopening_storage(tmp_path):
     storage_path = tmp_path / "incidents.json"

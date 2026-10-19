@@ -1,4 +1,3 @@
-
 """Tests for restoring active incidents."""
 
 from datetime import UTC, datetime

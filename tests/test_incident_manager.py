@@ -1,4 +1,3 @@
-
 from datetime import UTC
 
 from cloudpulse.incident_manager import Incident

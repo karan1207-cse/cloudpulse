@@ -1,126 +1,198 @@
+"""Local incident + monitoring-state storage (in-memory and JSON files)."""
 
-"""JSON storage for CloudPulse incidents."""
-
-import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from cloudpulse.incident_manager import Incident
+from cloudpulse.errors import ConcurrencyConflictError, StorageCorruptError
+from cloudpulse.incident_manager import Incident, incident_from_dict
+from cloudpulse.jsonfile import ensure_file, read_json, write_json
+from cloudpulse.state import ServiceState
 
 
-class JsonIncidentStorage:
-    """Persist incident records in a local JSON file."""
+def _service_of(record: dict[str, Any]) -> str | None:
+    return record.get("service_name") or record.get("service_url")
 
-    def __init__(self, file_path: str | Path) -> None:
-        self.file_path = Path(file_path)
-        self.file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if not self.file_path.exists():
-            self.file_path.write_text("[]", encoding="utf-8")
+def _validate_count(count: Any) -> int:
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        raise ValueError("Failure count must be a non-negative integer.")
+    return count
+
+
+def _validate_limit(limit: int) -> int:
+    if not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer.")
+    return limit
+
+
+class _LocalIncidentStore:
+    """Shared logic for local stores; subclasses provide load/save."""
+
+    def _load_incidents(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def _save_incidents(self, records: list[dict[str, Any]]) -> None:
+        raise NotImplementedError
+
+    def _load_states(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _save_states(self, states: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    # -- incidents ----------------------------------------------------------
 
     def add(self, incident: dict[str, Any]) -> None:
-        """Append an incident record."""
+        """Append an incident record (ids must be unique)."""
+        if "id" not in incident:
+            raise ValueError("Incident must contain an id.")
         records = self.get_all()
+        if any(record.get("id") == incident["id"] for record in records):
+            raise ConcurrencyConflictError(f"Incident {incident['id']} already exists.")
         records.append(incident.copy())
+        self._save_incidents(records)
 
-        self.file_path.write_text(
-            json.dumps(records, indent=2),
-            encoding="utf-8",
-        )
+    def get(self, incident_id: str) -> dict[str, Any] | None:
+        for record in self.get_all():
+            if record.get("id") == incident_id:
+                return record
+        return None
 
     def get_all(self) -> list[dict[str, Any]]:
         """Load all incident records."""
-        data = json.loads(
-            self.file_path.read_text(encoding="utf-8")
-        )
+        return self._load_incidents()
 
-        if not isinstance(data, list):
-            raise TypeError(
-                "Incident storage must contain a JSON list."
-            )
-
-        return data
+    def list_incidents(
+        self,
+        *,
+        status: str | None = None,
+        service: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        _validate_limit(limit)
+        records = [
+            record
+            for record in self.get_all()
+            if (status is None or record.get("status") == status)
+            and (service is None or _service_of(record) == service)
+        ]
+        records.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+        return records[:limit]
 
     def update(self, incident_id: str, updates: dict[str, Any]) -> bool:
         """Update an incident by ID; return whether it was found."""
         records = self.get_all()
-
         for record in records:
             if record.get("id") == incident_id:
                 record.update(updates)
-                self.file_path.write_text(
-                    json.dumps(records, indent=2),
-                    encoding="utf-8",
-                )
+                record["id"] = incident_id
+                self._save_incidents(records)
                 return True
-
         return False
 
     def count(self) -> int:
         """Return the number of stored incidents."""
         return len(self.get_all())
-    
+
+    def get_open_incidents(self, service: str) -> list[Incident]:
+        return [
+            incident_from_dict(record)
+            for record in self.list_incidents(
+                status="OPEN", service=service, limit=10_000
+            )
+        ]
+
+    def get_open_incident(self, service_url: str) -> Incident | None:
+        """Return the latest open incident for a service."""
+        incidents = self.get_open_incidents(service_url)
+        return incidents[0] if incidents else None
+
+    # -- monitoring state ---------------------------------------------------
+
+    def get_state(self, service: str) -> ServiceState | None:
+        raw = self._load_states().get(service)
+        if raw is None:
+            return None
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            # Legacy format: {"service": <failure count>}
+            if raw < 0:
+                raise StorageCorruptError(
+                    "Stored failure count must be a non-negative integer."
+                )
+            return ServiceState(service=service, consecutive_failures=raw)
+        if not isinstance(raw, dict):
+            raise StorageCorruptError(f"Monitoring state for {service!r} is invalid.")
+        return ServiceState.from_dict({**raw, "service": service})
+
+    def save_state(self, state: ServiceState) -> ServiceState:
+        states = self._load_states()
+        current = states.get(state.service)
+        current_version = 0
+        if isinstance(current, dict):
+            current_version = int(current.get("version", 0))
+        if current_version != state.version:
+            raise ConcurrencyConflictError(
+                f"State for {state.service!r} changed (stored version "
+                f"{current_version}, expected {state.version})."
+            )
+        saved = state.with_changes(version=state.version + 1)
+        states[state.service] = saved.to_dict()
+        self._save_states(states)
+        return saved
+
     def get_failure_count(self, service_url: str) -> int:
         """Return consecutive failures recorded for a service."""
-        state_path = self.file_path.with_name(
-            f"{self.file_path.stem}_state.json"
-        )
-
-        if not state_path.exists():
-            return 0
-
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-
-        if not isinstance(data, dict):
-            raise TypeError("Monitoring state must contain a JSON object.")
-
-        count = data.get(service_url, 0)
-
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-            raise ValueError("Stored failure count must be a non-negative integer.")
-
-        return count
+        state = self.get_state(service_url)
+        return state.consecutive_failures if state else 0
 
     def save_failure_count(self, service_url: str, count: int) -> None:
         """Persist consecutive failures for a service."""
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-            raise ValueError("Failure count must be a non-negative integer.")
+        _validate_count(count)
+        state = self.get_state(service_url) or ServiceState(service=service_url)
+        self.save_state(state.with_changes(consecutive_failures=count))
 
-        state_path = self.file_path.with_name(
-            f"{self.file_path.stem}_state.json"
-        )
 
-        data = {}
+class InMemoryIncidentStorage(_LocalIncidentStore):
+    """Process-local incident storage (tests, demos, ``--backend memory``)."""
 
-        if state_path.exists():
-            data = json.loads(state_path.read_text(encoding="utf-8"))
+    def __init__(self) -> None:
+        self._incidents: list[dict[str, Any]] = []
+        self._states: dict[str, Any] = {}
 
-            if not isinstance(data, dict):
-                raise TypeError("Monitoring state must contain a JSON object.")
+    def _load_incidents(self) -> list[dict[str, Any]]:
+        return [dict(record) for record in self._incidents]
 
-        data[service_url] = count
-        state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    
-    def get_open_incident(self, service_url: str) -> Incident | None:
-        """Return the latest open incident for a service."""
-        records = self.get_all()
+    def _save_incidents(self, records: list[dict[str, Any]]) -> None:
+        self._incidents = [dict(record) for record in records]
 
-        for record in reversed(records):
-            if (
-                record.get("service_url") == service_url
-                and record.get("status") == "OPEN"
-            ):
-                return Incident(
-                    id=record["id"],
-                    service_url=record["service_url"],
-                    severity=record.get("severity", "HIGH"),
-                    status="OPEN",
-                    created_at=datetime.fromisoformat(
-                        record["created_at"]
-                    ),
-                    recovered_at=None,
-                )
+    def _load_states(self) -> dict[str, Any]:
+        return dict(self._states)
 
-        return None
+    def _save_states(self, states: dict[str, Any]) -> None:
+        self._states = dict(states)
 
+
+class JsonIncidentStorage(_LocalIncidentStore):
+    """Persist incident records in a local JSON file.
+
+    Monitoring state lives next to it in ``<stem>_state.json``. Writes are
+    atomic. Corrupt files raise :class:`StorageCorruptError` and are never
+    overwritten. Designed for a single local process.
+    """
+
+    def __init__(self, file_path: str | Path) -> None:
+        self.file_path = Path(file_path)
+        self.state_path = self.file_path.with_name(f"{self.file_path.stem}_state.json")
+        ensure_file(self.file_path, "[]")
+
+    def _load_incidents(self) -> list[dict[str, Any]]:
+        return read_json(self.file_path, list, [])
+
+    def _save_incidents(self, records: list[dict[str, Any]]) -> None:
+        write_json(self.file_path, records)
+
+    def _load_states(self) -> dict[str, Any]:
+        return read_json(self.state_path, dict, {})
+
+    def _save_states(self, states: dict[str, Any]) -> None:
+        write_json(self.state_path, states)

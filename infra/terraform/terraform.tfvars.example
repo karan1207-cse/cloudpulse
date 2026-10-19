@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars (git-ignored) and replace the placeholders.
+aws_region   = "ap-south-1"
+project_name = "cloudpulse"
+environment  = "dev"
+
+# Public endpoints only: private, loopback and metadata addresses are blocked.
+# Do not put credentials or tokens in these URLs.
+services_json = <<-JSON
+  [
+    {"name": "example-site", "url": "https://example.com/", "failure_threshold": 3, "severity": "HIGH"}
+  ]
+JSON
+
+schedule_expression        = "rate(5 minutes)"
+min_check_interval_seconds = 120
+
+# Optional: receive alerts by email (must be confirmed by the recipient).
+# alert_email = "you@example.com"
+
+# Optional: allow a GitHub repository to deploy via OIDC (manual workflow).
+# github_repository      = "<owner>/<repo>"
+# terraform_state_bucket = "<your-terraform-state-bucket>"

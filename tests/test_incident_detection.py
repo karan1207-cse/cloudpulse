@@ -1,4 +1,3 @@
-
 from cloudpulse.incident_manager import ServiceIncidentTracker
 
 
@@ -39,6 +38,7 @@ def test_success_resets_counter_and_recovers_incident():
     assert recovered.status == "RECOVERED"
     assert tracker.consecutive_failures == 0
     assert tracker.active_incident is None
+
 
 def test_success_before_threshold_resets_failure_counter():
     tracker = ServiceIncidentTracker(
